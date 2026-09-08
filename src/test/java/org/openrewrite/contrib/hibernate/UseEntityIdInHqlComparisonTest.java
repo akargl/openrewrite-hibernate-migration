@@ -163,6 +163,159 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
     }
 
     @Test
+    void rewritesInPredicatesForCompatibleCollectionsArraysAndScalarLists() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.List;
+
+              class Queries {
+                  void run(EntityManager entityManager, List<Long> ids, Long[] idArray) {
+                      entityManager.createQuery("select a from MyEntity a where a in (:ids)")
+                              .setParameter("ids", ids);
+                      entityManager.createQuery("select a from MyEntity a where a in :ids")
+                              .setParameter("ids", ids);
+                      entityManager.createQuery("select a from MyEntity a where a not in (:ids)")
+                              .setParameter("ids", idArray);
+                      entityManager.createQuery("select a from MyEntity a where a in (1, 2)");
+                      entityManager.createQuery("select a from MyEntity a where a in (:first, :second)")
+                              .setParameter("first", 1L)
+                              .setParameter("second", 2L);
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.List;
+
+              class Queries {
+                  void run(EntityManager entityManager, List<Long> ids, Long[] idArray) {
+                      entityManager.createQuery("select a from MyEntity a where a.id in (:ids)")
+                              .setParameter("ids", ids);
+                      entityManager.createQuery("select a from MyEntity a where a.id in :ids")
+                              .setParameter("ids", ids);
+                      entityManager.createQuery("select a from MyEntity a where a.id not in (:ids)")
+                              .setParameter("ids", idArray);
+                      entityManager.createQuery("select a from MyEntity a where a.id in (1, 2)");
+                      entityManager.createQuery("select a from MyEntity a where a.id in (:first, :second)")
+                              .setParameter("first", 1L)
+                              .setParameter("second", 2L);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void supportsHibernateSetParameterList() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import java.util.List;
+              import org.hibernate.Session;
+
+              class Queries {
+                  void run(Session session, List<Long> ids) {
+                      session.createQuery("select a from MyEntity a where a in (:ids)")
+                              .setParameterList("ids", ids);
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import java.util.List;
+              import org.hibernate.Session;
+
+              class Queries {
+                  void run(Session session, List<Long> ids) {
+                      session.createQuery("select a from MyEntity a where a.id in (:ids)")
+                              .setParameterList("ids", ids);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    @SuppressWarnings("rawtypes")
+    void skipsEntityWrongRawAndUnboundCollectionParameters() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.List;
+
+              class Queries {
+                  void run(EntityManager entityManager, List<MyEntity> entities, List<String> names, List raw) {
+                      entityManager.createQuery("select a from MyEntity a where a in (:entities)")
+                              .setParameter("entities", entities);
+                      entityManager.createQuery("select a from MyEntity a where a in (:names)")
+                              .setParameter("names", names);
+                      entityManager.createQuery("select a from MyEntity a where a in (:raw)")
+                              .setParameter("raw", raw);
+                      entityManager.createQuery("select a from MyEntity a where a in (:unbound)");
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
     void usesConfiguredEntityNameAndIdentifierProperty() {
         rewriteRun(
           java(
@@ -402,6 +555,7 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
             """
               package example;
 
+              import java.util.List;
               import org.springframework.data.jpa.repository.Query;
               import org.springframework.data.repository.query.Param;
 
@@ -414,6 +568,9 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                   @Query("from Account a where a = :account")
                   Object findByEntity(Account account);
 
+                  @Query("from Account a where a in (:ids)")
+                  Object findAllByIdIn(List<Long> ids);
+
                   @Query(value = "select * from account a where a = 1", nativeQuery = true)
                   Object nativeQuery();
 
@@ -424,6 +581,7 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
             """
               package example;
 
+              import java.util.List;
               import org.springframework.data.jpa.repository.Query;
               import org.springframework.data.repository.query.Param;
 
@@ -435,6 +593,9 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
                   @Query("from Account a where a = :account")
                   Object findByEntity(Account account);
+
+                  @Query("from Account a where a.id in (:ids)")
+                  Object findAllByIdIn(List<Long> ids);
 
                   @Query(value = "select * from account a where a = 1", nativeQuery = true)
                   Object nativeQuery();

@@ -402,7 +402,8 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             @Override
             public J.MethodInvocation visitMethodInvocation(J.MethodInvocation methodInvocation, Integer ignored) {
                 J.MethodInvocation m = super.visitMethodInvocation(methodInvocation, ignored);
-                if (!"setParameter".equals(m.getSimpleName()) || m.getArguments().size() < 2) {
+                if (!("setParameter".equals(m.getSimpleName()) || "setParameterList".equals(m.getSimpleName())) ||
+                        m.getArguments().size() < 2) {
                     return m;
                 }
 
@@ -582,7 +583,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     }
 
     private static final class ParameterBindings {
-        private final Map<String, String> types = new HashMap<>();
+        private final Map<String, BoundType> types = new HashMap<>();
         private final Set<String> ambiguous = new HashSet<>();
 
         static ParameterBindings empty() {
@@ -590,14 +591,14 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         }
 
         void add(String parameter, JavaType type) {
-            String normalized = normalizedTypeName(type);
-            if (normalized == null) {
+            BoundType boundType = BoundType.from(type);
+            if (boundType == null) {
                 ambiguous.add(parameter);
                 types.remove(parameter);
                 return;
             }
-            String previous = types.putIfAbsent(parameter, normalized);
-            if (previous != null && !previous.equals(normalized)) {
+            BoundType previous = types.putIfAbsent(parameter, boundType);
+            if (previous != null && !previous.equals(boundType)) {
                 ambiguous.add(parameter);
                 types.remove(parameter);
             }
@@ -607,9 +608,18 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             if (ambiguous.contains(parameter)) {
                 return false;
             }
-            String bindingType = types.get(parameter);
+            BoundType bindingType = types.get(parameter);
             String idType = normalizedTypeName(identifierType);
-            return bindingType != null && bindingType.equals(idType);
+            return bindingType != null && bindingType.valueType.equals(idType);
+        }
+
+        boolean collectionElementsMatchIdentifier(String parameter, JavaType identifierType) {
+            if (ambiguous.contains(parameter)) {
+                return false;
+            }
+            BoundType bindingType = types.get(parameter);
+            String idType = normalizedTypeName(identifierType);
+            return bindingType != null && bindingType.elementType != null && bindingType.elementType.equals(idType);
         }
 
         private static String normalizedTypeName(JavaType type) {
@@ -623,6 +633,50 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
             JavaType.FullyQualified fullyQualified = TypeUtils.asFullyQualified(type);
             return fullyQualified == null ? null : fullyQualified.getFullyQualifiedName();
+        }
+
+        private static final class BoundType {
+            final String valueType;
+            final String elementType;
+
+            private BoundType(String valueType, String elementType) {
+                this.valueType = valueType;
+                this.elementType = elementType;
+            }
+
+            static BoundType from(JavaType type) {
+                if (type instanceof JavaType.Array) {
+                    String elementType = normalizedTypeName(((JavaType.Array) type).getElemType());
+                    return elementType == null ? null : new BoundType(elementType + "[]", elementType);
+                }
+                String valueType = normalizedTypeName(type);
+                if (valueType == null) {
+                    return null;
+                }
+                if (type instanceof JavaType.Parameterized && TypeUtils.isAssignableTo("java.lang.Iterable", type)) {
+                    List<JavaType> parameters = ((JavaType.Parameterized) type).getTypeParameters();
+                    String elementType = parameters.size() == 1 ? normalizedTypeName(parameters.get(0)) : null;
+                    return new BoundType(valueType, elementType);
+                }
+                return new BoundType(valueType, null);
+            }
+
+            @Override
+            public boolean equals(Object other) {
+                if (this == other) {
+                    return true;
+                }
+                if (!(other instanceof BoundType)) {
+                    return false;
+                }
+                BoundType that = (BoundType) other;
+                return valueType.equals(that.valueType) && java.util.Objects.equals(elementType, that.elementType);
+            }
+
+            @Override
+            public int hashCode() {
+                return 31 * valueType.hashCode() + (elementType == null ? 0 : elementType.hashCode());
+            }
         }
     }
 
@@ -809,6 +863,57 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
         }
 
+        @Override
+        public void enterInPredicate(HqlParser.InPredicateContext ctx) {
+            HqlParser.ExpressionContext testedExpression = ctx.expression();
+            if (testedExpression == null) {
+                return;
+            }
+            String tested = source(testedExpression);
+            PathResolution testedPath = resolvePath(tested, aliases, acc);
+            if (testedPath.kind != PathKind.ENTITY || !inListMatchesIdentifier(ctx.inList(), testedPath.entity)) {
+                return;
+            }
+            addIdentifier(testedExpression, testedPath.entity);
+        }
+
+        private boolean inListMatchesIdentifier(HqlParser.InListContext inList, EntityInfo entity) {
+            JavaType identifierType = acc.identifierType(entity);
+            if (identifierType == null) {
+                return false;
+            }
+            if (inList instanceof HqlParser.ParamInListContext) {
+                String parameter = ((HqlParser.ParamInListContext) inList).parameter().getText();
+                return bindings.collectionElementsMatchIdentifier(parameter, identifierType);
+            }
+            if (!(inList instanceof HqlParser.ExplicitTupleInListContext)) {
+                return false;
+            }
+
+            List<HqlParser.ExpressionOrPredicateContext> items =
+                    ((HqlParser.ExplicitTupleInListContext) inList).expressionOrPredicate();
+            if (items.isEmpty()) {
+                return false;
+            }
+            boolean singleton = items.size() == 1;
+            for (HqlParser.ExpressionOrPredicateContext item : items) {
+                String value = source(item);
+                if (PARAMETER.matcher(value).matches()) {
+                    boolean compatible = bindings.matchesIdentifier(value, identifierType) ||
+                            (singleton && bindings.collectionElementsMatchIdentifier(value, identifierType));
+                    if (!compatible) {
+                        return false;
+                    }
+                } else {
+                    PathResolution valuePath = resolvePath(value, aliases, acc);
+                    if (!isScalar(value, valuePath, entity, bindings, acc)) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
         private boolean isEqualityOperator(HqlParser.ExpressionContext left, HqlParser.ExpressionContext right) {
             int start = left.getStop().getStopIndex() + 1;
             int end = right.getStart().getStartIndex();
@@ -826,10 +931,10 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
         }
 
-        private String source(HqlParser.ExpressionContext expression) {
-            int start = expression.getStart().getStartIndex();
-            int end = expression.getStop().getStopIndex() + 1;
-            return start < 0 || end < start || end > hql.length() ? expression.getText() : hql.substring(start, end).trim();
+        private String source(org.antlr.v4.runtime.ParserRuleContext context) {
+            int start = context.getStart().getStartIndex();
+            int end = context.getStop().getStopIndex() + 1;
+            return start < 0 || end < start || end > hql.length() ? context.getText() : hql.substring(start, end).trim();
         }
     }
 
