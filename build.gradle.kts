@@ -3,7 +3,7 @@ plugins {
     `maven-publish`
 }
 
-group = "org.openrewrite.contrib"
+group = "com.akargl.openrewrite"
 version = "0.1.0-SNAPSHOT"
 
 repositories {

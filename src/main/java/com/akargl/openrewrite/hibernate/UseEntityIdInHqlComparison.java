@@ -1,4 +1,4 @@
-package org.openrewrite.contrib.hibernate;
+package com.akargl.openrewrite.hibernate;
 
 import org.antlr.v4.runtime.BaseErrorListener;
 import org.antlr.v4.runtime.CharStreams;

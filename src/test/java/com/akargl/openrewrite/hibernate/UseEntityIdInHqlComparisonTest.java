@@ -1,4 +1,4 @@
-package org.openrewrite.contrib.hibernate;
+package com.akargl.openrewrite.hibernate;
 
 import org.junit.jupiter.api.Test;
 import org.openrewrite.java.JavaParser;

@@ -4,7 +4,7 @@ Recipes for recurring source changes encountered when migrating from Hibernate 5
 
 ## Use entity identifiers in HQL comparisons
 
-`org.openrewrite.contrib.hibernate.UseEntityIdInHqlComparison` changes comparisons between an entity-valued HQL expression and a scalar identifier so that the identifier property is explicit.
+`com.akargl.openrewrite.hibernate.UseEntityIdInHqlComparison` changes comparisons between an entity-valued HQL expression and a scalar identifier so that the identifier property is explicit.
 
 ```diff
 -select a from MyEntity a where a = 123
@@ -31,19 +31,19 @@ The project requires JDK 21. Run the tests and publish the recipe JAR to the loc
 The published artifact coordinates are:
 
 ```text
-org.openrewrite.contrib:openrewrite-hibernate-migration:0.1.0-SNAPSHOT
+com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT
 ```
 
 The aggregate recipe intended for normal use is:
 
 ```text
-org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries
+com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 ```
 
 To run only the entity-ID recipe, use:
 
 ```text
-org.openrewrite.contrib.hibernate.UseEntityIdInHqlComparison
+com.akargl.openrewrite.hibernate.UseEntityIdInHqlComparison
 ```
 
 The examples below use OpenRewrite Gradle plugin `7.41.0` and Maven plugin `6.47.0`. OpenRewrite currently distributes its plugins through the [Code Genome Project repository](https://docs.openrewrite.org/running-recipes/getting-started), which requires download credentials. If that repository is already configured globally or mirrored internally, retain that configuration instead of duplicating it.
@@ -87,11 +87,11 @@ repositories {
 }
 
 dependencies {
-    rewrite("org.openrewrite.contrib:openrewrite-hibernate-migration:0.1.0-SNAPSHOT")
+    rewrite("com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT")
 }
 
 rewrite {
-    activeRecipe("org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries")
+    activeRecipe("com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries")
 }
 ```
 
@@ -116,12 +116,12 @@ Add the OpenRewrite plugin to the target project's `pom.xml`:
     <version>6.47.0</version>
     <configuration>
         <activeRecipes>
-            <recipe>org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries</recipe>
+            <recipe>com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries</recipe>
         </activeRecipes>
     </configuration>
     <dependencies>
         <dependency>
-            <groupId>org.openrewrite.contrib</groupId>
+            <groupId>com.akargl.openrewrite</groupId>
             <artifactId>openrewrite-hibernate-migration</artifactId>
             <version>0.1.0-SNAPSHOT</version>
         </dependency>
@@ -174,7 +174,7 @@ rootProject {
     dependencies {
         add(
             "rewrite",
-            "org.openrewrite.contrib:openrewrite-hibernate-migration:0.1.0-SNAPSHOT"
+            "com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT"
         )
     }
 
@@ -198,10 +198,10 @@ From the target Gradle project, point its wrapper at the init script and select 
 
 ```shell
 ./gradlew --init-script /absolute/path/to/init.gradle.kts rewriteDryRun \
-  -Drewrite.activeRecipe=org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries
+  -Drewrite.activeRecipe=com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 
 ./gradlew --init-script /absolute/path/to/init.gradle.kts rewriteRun \
-  -Drewrite.activeRecipe=org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries
+  -Drewrite.activeRecipe=com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 ```
 
 Do not combine this init-script setup with an existing `rewrite { ... }` block in the target build. See OpenRewrite's [standalone Gradle guide](https://docs.openrewrite.org/running-recipes/running-rewrite-on-a-gradle-project-without-modifying-the-build).
@@ -214,16 +214,16 @@ From the target Maven project, preview the recipe:
 
 ```shell
 mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.47.0:dryRun \
-  -Drewrite.recipeArtifactCoordinates=org.openrewrite.contrib:openrewrite-hibernate-migration:0.1.0-SNAPSHOT \
-  -Drewrite.activeRecipes=org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries
+  -Drewrite.recipeArtifactCoordinates=com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT \
+  -Drewrite.activeRecipes=com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 ```
 
 Apply it:
 
 ```shell
 mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.47.0:run \
-  -Drewrite.recipeArtifactCoordinates=org.openrewrite.contrib:openrewrite-hibernate-migration:0.1.0-SNAPSHOT \
-  -Drewrite.activeRecipes=org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries
+  -Drewrite.recipeArtifactCoordinates=com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT \
+  -Drewrite.activeRecipes=com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 ```
 
 Always review the generated patch or `git diff` before committing the changes.
