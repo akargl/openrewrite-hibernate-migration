@@ -97,7 +97,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
     @Override
     public TreeVisitor<?, ExecutionContext> getScanner(Accumulator acc) {
-        return new JavaIsoVisitor<ExecutionContext>() {
+        return new JavaIsoVisitor<>() {
             @Override
             public J.ClassDeclaration visitClassDeclaration(J.ClassDeclaration classDecl, ExecutionContext ctx) {
                 J.ClassDeclaration c = super.visitClassDeclaration(classDecl, ctx);
@@ -151,7 +151,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
     @Override
     public TreeVisitor<?, ExecutionContext> getVisitor(Accumulator acc) {
-        return new JavaIsoVisitor<ExecutionContext>() {
+        return new JavaIsoVisitor<>() {
             private static final String IMPERATIVE_BINDINGS = "hqlImperativeBindings";
 
             @Override
@@ -190,10 +190,10 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 var arguments = new ArrayList<>(m.getArguments());
                 Map<UUID, ParameterBindings> byQuery = getCursor().getNearestMessage(IMPERATIVE_BINDINGS);
                 ParameterBindings bindings = ParameterBindings.empty();
-                if (arguments.get(0) instanceof J.Literal literal && byQuery != null) {
+                if (arguments.getFirst() instanceof J.Literal literal && byQuery != null) {
                     bindings = byQuery.getOrDefault(literal.getId(), bindings);
                 }
-                arguments.set(0, rewriteLiteral(arguments.get(0), acc, bindings));
+                arguments.set(0, rewriteLiteral(arguments.getFirst(), acc, bindings));
                 return m.withArguments(arguments);
             }
         };
@@ -217,7 +217,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     private static void scanMethod(EntityInfo info, J.MethodDeclaration method) {
         String property = getterProperty(method.getSimpleName());
         boolean hasParameters = !method.getParameters().isEmpty() &&
-                !(method.getParameters().size() == 1 && method.getParameters().get(0) instanceof J.Empty);
+                !(method.getParameters().size() == 1 && method.getParameters().getFirst() instanceof J.Empty);
         if (property == null || hasParameters) {
             return;
         }
@@ -468,7 +468,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             return null;
         }
         if (isQueryMethod(method) && !method.getArguments().isEmpty() &&
-                method.getArguments().get(0) instanceof J.Literal literal) {
+                method.getArguments().getFirst() instanceof J.Literal literal) {
             return literal.getValue() instanceof String ? literal : null;
         }
         return findQueryLiteral(method.getSelect());
@@ -634,7 +634,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 if (type instanceof JavaType.Parameterized parameterized &&
                         TypeUtils.isAssignableTo("java.lang.Iterable", parameterized)) {
                     List<JavaType> parameters = parameterized.getTypeParameters();
-                    String elementType = parameters.size() == 1 ? normalizedTypeName(parameters.get(0)) : null;
+                    String elementType = parameters.size() == 1 ? normalizedTypeName(parameters.getFirst()) : null;
                     return new BoundType(valueType, elementType);
                 }
                 return new BoundType(valueType, null);
