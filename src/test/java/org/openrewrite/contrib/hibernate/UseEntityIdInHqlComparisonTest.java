@@ -12,11 +12,12 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
     public void defaults(RecipeSpec spec) {
         spec.recipe(new UseEntityIdInHqlComparison())
                 .parser(JavaParser.fromJavaVersion()
-                        .classpath("jakarta.persistence-api", "javax.persistence-api", "hibernate-core", "spring-data-jpa"));
+                        .classpath("jakarta.persistence-api", "javax.persistence-api", "hibernate-core",
+                                "spring-data-jpa", "spring-data-commons"));
     }
 
     @Test
-    void rewritesRootAliasComparedWithLiteralAndParameter() {
+    void rewritesRootAliasComparedWithLiteralAndBoundScalarParameter() {
         rewriteRun(
           java(
             """
@@ -41,7 +42,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               class Queries {
                   void run(EntityManager entityManager) {
                       entityManager.createQuery("select a from MyEntity a where a = 123");
-                      entityManager.createQuery("select a from MyEntity a where :id <> a");
+                      entityManager.createQuery("select a from MyEntity a where :id <> a")
+                              .setParameter("id", 123L);
                   }
               }
               """,
@@ -53,7 +55,106 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               class Queries {
                   void run(EntityManager entityManager) {
                       entityManager.createQuery("select a from MyEntity a where a.id = 123");
-                      entityManager.createQuery("select a from MyEntity a where :id <> a.id");
+                      entityManager.createQuery("select a from MyEntity a where :id <> a.id")
+                              .setParameter("id", 123L);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void rewritesParameterBoundOnLocalQueryVariable() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import jakarta.persistence.Query;
+
+              class Queries {
+                  void run(EntityManager entityManager, long id) {
+                      Query query = entityManager.createQuery("select a from MyEntity a where a = :id");
+                      query.setParameter("id", id);
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import jakarta.persistence.Query;
+
+              class Queries {
+                  void run(EntityManager entityManager, long id) {
+                      Query query = entityManager.createQuery("select a from MyEntity a where a.id = :id");
+                      query.setParameter("id", id);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void skipsUnboundEntityTypedMismatchedAndAmbiguousParameters() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import jakarta.persistence.Query;
+
+              class Queries {
+                  void run(EntityManager entityManager, MyEntity entity) {
+                      entityManager.createQuery("select a from MyEntity a where a = :unbound");
+                      entityManager.createQuery("select a from MyEntity a where a = :entity")
+                              .setParameter("entity", entity);
+                      entityManager.createQuery("select a from MyEntity a where a = :wrongType")
+                              .setParameter("wrongType", "123");
+
+                      Query ambiguous = entityManager.createQuery(
+                              "select a from MyEntity a where a = :ambiguous"
+                      );
+                      ambiguous.setParameter("ambiguous", 123L);
+                      ambiguous.setParameter("ambiguous", "123");
+
+                      Query reassigned = entityManager.createQuery(
+                              "select a from MyEntity a where a = :reassigned"
+                      );
+                      reassigned = entityManager.createQuery("select a from MyEntity a where a.id = :reassigned");
+                      reassigned.setParameter("reassigned", 123L);
                   }
               }
               """
@@ -88,7 +189,7 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
               import jakarta.persistence.NamedQuery;
 
-              @NamedQuery(name = "customer", query = "from CustomerRecord c where c = :number")
+              @NamedQuery(name = "customer", query = "from CustomerRecord c where c = 'number'")
               class CustomerQueries {
               }
               """,
@@ -97,8 +198,19 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
               import jakarta.persistence.NamedQuery;
 
-              @NamedQuery(name = "customer", query = "from CustomerRecord c where c.customerNumber = :number")
+              @NamedQuery(name = "customer", query = "from CustomerRecord c where c.customerNumber = 'number'")
               class CustomerQueries {
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.NamedQuery;
+
+              @NamedQuery(name = "unresolved", query = "from CustomerRecord c where c = :number")
+              class UnresolvedCustomerQueries {
               }
               """
           )
@@ -145,7 +257,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
               class Queries {
                   void run(EntityManager em) {
-                      em.createQuery("from PurchaseOrder o where o.customer = :customerId");
+                      em.createQuery("from PurchaseOrder o where o.customer = :customerId")
+                              .setParameter("customerId", "abc");
                       em.createQuery("select o from PurchaseOrder o join o.customer c where c = 'abc'");
                   }
               }
@@ -157,7 +270,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
               class Queries {
                   void run(EntityManager em) {
-                      em.createQuery("from PurchaseOrder o where o.customer.id = :customerId");
+                      em.createQuery("from PurchaseOrder o where o.customer.id = :customerId")
+                              .setParameter("customerId", "abc");
                       em.createQuery("select o from PurchaseOrder o join o.customer c where c.id = 'abc'");
                   }
               }
@@ -202,7 +316,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
               class Queries {
                   void run(EntityManager em) {
-                      em.createQuery("from ChildEntity c where c = ?1");
+                      em.createQuery("from ChildEntity c where c = ?1")
+                              .setParameter(1, 1L);
                   }
               }
               """,
@@ -213,7 +328,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
               class Queries {
                   void run(EntityManager em) {
-                      em.createQuery("from ChildEntity c where c.key = ?1");
+                      em.createQuery("from ChildEntity c where c.key = ?1")
+                              .setParameter(1, 1L);
                   }
               }
               """
@@ -287,12 +403,16 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               package example;
 
               import org.springframework.data.jpa.repository.Query;
+              import org.springframework.data.repository.query.Param;
 
               interface AccountRepository {
                   boolean NATIVE = true;
 
-                  @Query("from Account a where a = :id")
-                  Object findOne(long id);
+                  @Query("from Account a where a = :accountId")
+                  Object findOne(@Param("accountId") long id);
+
+                  @Query("from Account a where a = :account")
+                  Object findByEntity(Account account);
 
                   @Query(value = "select * from account a where a = 1", nativeQuery = true)
                   Object nativeQuery();
@@ -305,12 +425,16 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               package example;
 
               import org.springframework.data.jpa.repository.Query;
+              import org.springframework.data.repository.query.Param;
 
               interface AccountRepository {
                   boolean NATIVE = true;
 
-                  @Query("from Account a where a.id = :id")
-                  Object findOne(long id);
+                  @Query("from Account a where a.id = :accountId")
+                  Object findOne(@Param("accountId") long id);
+
+                  @Query("from Account a where a = :account")
+                  Object findByEntity(Account account);
 
                   @Query(value = "select * from account a where a = 1", nativeQuery = true)
                   Object nativeQuery();
@@ -352,7 +476,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                               select e
                               from TextBlockEntity e
                               where e = :id
-                              \""");
+                              \""")
+                              .setParameter("id", 1L);
                   }
               }
               """,
@@ -367,7 +492,8 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                               select e
                               from TextBlockEntity e
                               where e.id = :id
-                              \""");
+                              \""")
+                              .setParameter("id", 1L);
                   }
               }
               """
