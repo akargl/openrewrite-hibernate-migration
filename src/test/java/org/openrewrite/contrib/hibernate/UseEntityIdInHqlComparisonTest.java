@@ -251,9 +251,11 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               import org.hibernate.Session;
 
               class Queries {
-                  void run(Session session, List<Long> ids) {
+                  void run(Session session, List<Long> ids, List rawIds) {
                       session.createQuery("select a from MyEntity a where a in (:ids)")
                               .setParameterList("ids", ids);
+                      session.createQuery("select a from MyEntity a where a in (:rawIds)")
+                              .setParameterList("rawIds", rawIds, Long.class);
                   }
               }
               """,
@@ -264,9 +266,11 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               import org.hibernate.Session;
 
               class Queries {
-                  void run(Session session, List<Long> ids) {
+                  void run(Session session, List<Long> ids, List rawIds) {
                       session.createQuery("select a from MyEntity a where a.id in (:ids)")
                               .setParameterList("ids", ids);
+                      session.createQuery("select a from MyEntity a where a.id in (:rawIds)")
+                              .setParameterList("rawIds", rawIds, Long.class);
                   }
               }
               """
@@ -571,6 +575,9 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                   @Query("from Account a where a in (:ids)")
                   Object findAllByIdIn(List<Long> ids);
 
+                  @Query("from Account a where a in (?1)")
+                  Object findAllByIdInPositionally(List<Long> ids);
+
                   @Query(value = "select * from account a where a = 1", nativeQuery = true)
                   Object nativeQuery();
 
@@ -596,6 +603,9 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
 
                   @Query("from Account a where a.id in (:ids)")
                   Object findAllByIdIn(List<Long> ids);
+
+                  @Query("from Account a where a.id in (?1)")
+                  Object findAllByIdInPositionally(List<Long> ids);
 
                   @Query(value = "select * from account a where a = 1", nativeQuery = true)
                   Object nativeQuery();
@@ -672,6 +682,7 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               import jakarta.persistence.Entity;
               import jakarta.persistence.EmbeddedId;
               import jakarta.persistence.Id;
+              import jakarta.persistence.IdClass;
 
               @Entity
               class SimpleEntity {
@@ -690,6 +701,20 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                   long first;
                   long second;
               }
+
+              @Entity
+              @IdClass(LegacyCompositeKey.class)
+              class IdClassEntity {
+                  @Id
+                  long first;
+                  @Id
+                  long second;
+              }
+
+              class LegacyCompositeKey {
+                  long first;
+                  long second;
+              }
               """
           ),
           java(
@@ -704,6 +729,7 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                       em.createQuery("from SimpleEntity a, SimpleEntity b where a = b");
                       em.createQuery("from SimpleEntity a where a.name = 'name'");
                       em.createQuery("from CompositeEntity c where c = 1");
+                      em.createQuery("from IdClassEntity c where c = 1");
                       em.createNativeQuery("select * from simple_entity where id = 1");
                       em.createQuery("from SimpleEntity a where a = " + dynamic);
                       String unrelated = "from SimpleEntity a where a = 1";
@@ -746,6 +772,211 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
               class Queries {
                   void run(EntityManager em) {
                       em.createQuery("from OuterEntity e where e = 1 and exists (select e from InnerEntity e where e = 'x')");
+                      em.createQuery("from OuterEntity e where e = 1 union from OuterEntity e where e = 2");
+                      em.createQuery("from OuterEntity e where e =");
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void rewritesMultiplePredicatesAndMutationQueries() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+                  String name;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import org.hibernate.Session;
+
+              class Queries {
+                  void run(EntityManager entityManager, Session session) {
+                      entityManager.createQuery("from MyEntity a where a = 1 or 2 <> a");
+                      entityManager.createQuery("update MyEntity a set a.name = 'updated' where a = 3");
+                      session.createSelectionQuery("from example.MyEntity a where a = 5", MyEntity.class);
+                      session.createMutationQuery("delete from MyEntity a where a = :id")
+                              .setParameter("id", 4L);
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import org.hibernate.Session;
+
+              class Queries {
+                  void run(EntityManager entityManager, Session session) {
+                      entityManager.createQuery("from MyEntity a where a.id = 1 or 2 <> a.id");
+                      entityManager.createQuery("update MyEntity a set a.name = 'updated' where a.id = 3");
+                      session.createSelectionQuery("from example.MyEntity a where a.id = 5", MyEntity.class);
+                      session.createMutationQuery("delete from MyEntity a where a.id = :id")
+                              .setParameter("id", 4L);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void rewritesPositionalArrayAndCovariantCollectionParameters() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.Collection;
+              import java.util.List;
+
+              class Queries {
+                  void run(EntityManager entityManager, List<Long> ids, long[] idArray,
+                           Collection<? extends Long> covariantIds) {
+                      entityManager.createQuery("from MyEntity a where a in (?1)")
+                              .setParameter(1, ids);
+                      entityManager.createQuery("from MyEntity a where a in (:array)")
+                              .setParameter("array", idArray);
+                      entityManager.createQuery("from MyEntity a where a in (:covariant)")
+                              .setParameter("covariant", covariantIds);
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.Collection;
+              import java.util.List;
+
+              class Queries {
+                  void run(EntityManager entityManager, List<Long> ids, long[] idArray,
+                           Collection<? extends Long> covariantIds) {
+                      entityManager.createQuery("from MyEntity a where a.id in (?1)")
+                              .setParameter(1, ids);
+                      entityManager.createQuery("from MyEntity a where a.id in (:array)")
+                              .setParameter("array", idArray);
+                      entityManager.createQuery("from MyEntity a where a.id in (:covariant)")
+                              .setParameter("covariant", covariantIds);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void usesExplicitParameterTypeForNullHibernateBinding() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import org.hibernate.Session;
+
+              class Queries {
+                  void run(Session session) {
+                      session.createQuery("from MyEntity a where a = :id")
+                              .setParameter("id", null, Long.class);
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import org.hibernate.Session;
+
+              class Queries {
+                  void run(Session session) {
+                      session.createQuery("from MyEntity a where a.id = :id")
+                              .setParameter("id", null, Long.class);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void preservesNullAndMixedEntityValuedComparisons() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.List;
+
+              class Queries {
+                  void run(EntityManager entityManager, MyEntity entity, List<MyEntity> entities, long id) {
+                      entityManager.createQuery("from MyEntity a where a = null");
+                      entityManager.createQuery("from MyEntity a where null <> a");
+                      entityManager.createQuery("from MyEntity a where a = :entity")
+                              .setParameter("entity", entity);
+                      entityManager.createQuery("from MyEntity a where a in (:entities)")
+                              .setParameter("entities", entities);
+                      entityManager.createQuery("from MyEntity a where a in (:id, :entity)")
+                              .setParameter("id", id)
+                              .setParameter("entity", entity);
                   }
               }
               """

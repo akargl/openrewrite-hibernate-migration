@@ -411,13 +411,41 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
                 String parameter = parameterKey(m.getArguments().get(0));
                 if (queryId != null && parameter != null) {
-                    result.computeIfAbsent(queryId, unused -> new ParameterBindings())
-                            .add(parameter, m.getArguments().get(1).getType());
+                    ParameterBindings bindings = result.computeIfAbsent(queryId, unused -> new ParameterBindings());
+                    if ("setParameterList".equals(m.getSimpleName())) {
+                        bindings.addCollection(
+                                parameter, m.getArguments().get(1).getType(), explicitClassType(m)
+                        );
+                    } else {
+                        bindings.add(parameter, boundValueType(m));
+                    }
                 }
                 return m;
             }
         }.visit(method, 0);
         return result;
+    }
+
+    private static JavaType boundValueType(J.MethodInvocation binding) {
+        JavaType valueType = binding.getArguments().get(1).getType();
+        if (ParameterBindings.normalizedTypeName(valueType) != null) {
+            return valueType;
+        }
+        JavaType explicitType = explicitClassType(binding);
+        return explicitType == null ? valueType : explicitType;
+    }
+
+    private static JavaType explicitClassType(J.MethodInvocation binding) {
+        if (binding.getArguments().size() < 3) {
+            return null;
+        }
+        JavaType explicitType = binding.getArguments().get(2).getType();
+        if (explicitType instanceof JavaType.Parameterized parameterized &&
+                "java.lang.Class".equals(parameterized.getFullyQualifiedName()) &&
+                parameterized.getTypeParameters().size() == 1) {
+            return parameterized.getTypeParameters().getFirst();
+        }
+        return null;
     }
 
     private static ParameterBindings springMethodBindings(Cursor cursor) {
@@ -579,6 +607,18 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
         void add(String parameter, JavaType type) {
             BoundType boundType = BoundType.from(type);
+            add(parameter, boundType);
+        }
+
+        void addCollection(String parameter, JavaType collectionType, JavaType explicitElementType) {
+            BoundType collection = BoundType.from(collectionType);
+            String elementType = collection == null || collection.elementType() == null ?
+                    normalizedTypeName(explicitElementType) : collection.elementType();
+            String valueType = collection == null ? null : collection.valueType();
+            add(parameter, elementType == null ? null : new BoundType(valueType, elementType));
+        }
+
+        private void add(String parameter, BoundType boundType) {
             if (boundType == null) {
                 ambiguous.add(parameter);
                 types.remove(parameter);
@@ -616,6 +656,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                     return null;
                 }
                 return primitive.getClassName();
+            }
+            if (type instanceof JavaType.GenericTypeVariable generic &&
+                    generic.getVariance() != JavaType.GenericTypeVariable.Variance.CONTRAVARIANT &&
+                    generic.getBounds().size() == 1) {
+                return normalizedTypeName(generic.getBounds().getFirst());
             }
             JavaType.FullyQualified fullyQualified = TypeUtils.asFullyQualified(type);
             return fullyQualified == null ? null : fullyQualified.getFullyQualifiedName();
@@ -889,9 +934,9 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         if (PARAMETER.matcher(candidate).matches()) {
             return bindings.matchesIdentifier(candidate, acc.identifierType(comparedEntity));
         }
-        return path.kind() == PathKind.SCALAR || NUMBER.matcher(candidate).matches() || isQuoted(candidate) ||
-                "true".equalsIgnoreCase(candidate) || "false".equalsIgnoreCase(candidate) ||
-                "null".equalsIgnoreCase(candidate);
+        return !"null".equalsIgnoreCase(candidate) &&
+                (path.kind() == PathKind.SCALAR || NUMBER.matcher(candidate).matches() || isQuoted(candidate) ||
+                 "true".equalsIgnoreCase(candidate) || "false".equalsIgnoreCase(candidate));
     }
 
     private static boolean isQuoted(String value) {

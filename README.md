@@ -13,11 +13,11 @@ Recipes for recurring source changes encountered when migrating from Hibernate 5
 
 The recipe discovers `@Entity`, `@MappedSuperclass`, `@Id`, and entity association metadata from Java source. It supports Java string literals and text blocks used by JPA/Hibernate query creation methods, JPA/Hibernate `@NamedQuery`, and Spring Data JPA `@Query`.
 
-HQL parameters are not assumed to be identifiers. A parameter comparison is changed only when the recipe can prove that the Java value bound through `setParameter(...)`, or declared by a Spring Data repository method, has the same type as the entity identifier. Unbound parameters, entity-typed parameters, conflicting bindings, and parameterized named queries without an analyzable binding are left unchanged.
+HQL parameters are not assumed to be identifiers. A parameter comparison is changed only when the recipe can prove that the Java value bound through `setParameter(...)`, or declared by a Spring Data repository method, has the same type as the entity identifier. Explicit Hibernate `Class` arguments are used to type otherwise untyped `null` bindings. Unbound parameters, entity-typed parameters, conflicting bindings, and parameterized named queries without an analyzable binding are left unchanged.
 
-`IN` and `NOT IN` predicates are supported for compatible generic collections, arrays, literal lists, individually bound scalar parameters, and Hibernate `setParameterList(...)` bindings. Raw collections, unknown element types, and collections of entities are left unchanged.
+`IN` and `NOT IN` predicates are supported for compatible generic collections (including covariant bounds), arrays, literal lists, individually bound scalar parameters, and Hibernate `setParameterList(...)` bindings. An explicit element class on `setParameterList(...)` can make a raw collection safe to analyze; raw collections without that information, unknown element types, and collections of entities are left unchanged.
 
-To avoid unsafe changes, it skips native SQL, dynamic string construction, ambiguous entity names, malformed HQL, unresolved paths, and composite identifiers.
+To avoid unsafe changes, it skips native SQL, dynamic string construction, ambiguous entity names, malformed HQL, unresolved paths, composite identifiers, and comparisons with `null`.
 
 Run the tests with:
 
