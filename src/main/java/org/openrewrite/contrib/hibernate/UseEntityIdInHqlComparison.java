@@ -9,6 +9,7 @@ import org.antlr.v4.runtime.tree.ParseTreeWalker;
 import org.hibernate.grammars.hql.HqlLexer;
 import org.hibernate.grammars.hql.HqlParser;
 import org.hibernate.grammars.hql.HqlParserBaseListener;
+import org.openrewrite.Cursor;
 import org.openrewrite.ExecutionContext;
 import org.openrewrite.ScanningRecipe;
 import org.openrewrite.TreeVisitor;
@@ -30,6 +31,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -131,10 +133,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 }
 
                 for (Statement statement : c.getBody().getStatements()) {
-                    if (statement instanceof J.VariableDeclarations) {
-                        scanField(info, (J.VariableDeclarations) statement);
-                    } else if (statement instanceof J.MethodDeclaration) {
-                        scanMethod(info, (J.MethodDeclaration) statement);
+                    switch (statement) {
+                        case J.VariableDeclarations field -> scanField(info, field);
+                        case J.MethodDeclaration method -> scanMethod(info, method);
+                        default -> {
+                        }
                     }
                 }
                 if (info.idProperties.size() != 1) {
@@ -184,11 +187,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                     return m;
                 }
 
-                List<Expression> arguments = new ArrayList<>(m.getArguments());
+                var arguments = new ArrayList<>(m.getArguments());
                 Map<UUID, ParameterBindings> byQuery = getCursor().getNearestMessage(IMPERATIVE_BINDINGS);
                 ParameterBindings bindings = ParameterBindings.empty();
-                if (arguments.get(0) instanceof J.Literal && byQuery != null) {
-                    bindings = byQuery.getOrDefault(((J.Literal) arguments.get(0)).getId(), bindings);
+                if (arguments.get(0) instanceof J.Literal literal && byQuery != null) {
+                    bindings = byQuery.getOrDefault(literal.getId(), bindings);
                 }
                 arguments.set(0, rewriteLiteral(arguments.get(0), acc, bindings));
                 return m.withArguments(arguments);
@@ -230,29 +233,19 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     }
 
     private static Expression rewriteQueryAttribute(Expression expression, Accumulator acc, ParameterBindings bindings) {
-        if (expression instanceof J.Literal) {
-            return rewriteLiteral(expression, acc, bindings);
-        }
-        if (!(expression instanceof J.Assignment)) {
-            return expression;
-        }
-        J.Assignment assignment = (J.Assignment) expression;
-        if (!"query".equals(assignment.getVariable().toString()) &&
-                !"value".equals(assignment.getVariable().toString())) {
-            return expression;
-        }
-        return assignment.withAssignment(rewriteLiteral(assignment.getAssignment(), acc, bindings));
+        return switch (expression) {
+            case J.Literal literal -> rewriteLiteral(literal, acc, bindings);
+            case J.Assignment assignment when "query".equals(assignment.getVariable().toString()) ||
+                    "value".equals(assignment.getVariable().toString()) ->
+                    assignment.withAssignment(rewriteLiteral(assignment.getAssignment(), acc, bindings));
+            default -> expression;
+        };
     }
 
     private static Expression rewriteLiteral(Expression expression, Accumulator acc, ParameterBindings bindings) {
-        if (!(expression instanceof J.Literal)) {
+        if (!(expression instanceof J.Literal literal) || !(literal.getValue() instanceof String query)) {
             return expression;
         }
-        J.Literal literal = (J.Literal) expression;
-        if (!(literal.getValue() instanceof String)) {
-            return expression;
-        }
-        String query = (String) literal.getValue();
         String rewritten = HqlRewriter.rewrite(query, acc, bindings);
         if (query.equals(rewritten)) {
             return literal;
@@ -271,16 +264,16 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         StringBuilder escaped = new StringBuilder(value.length() + 2).append('\"');
         for (int i = 0; i < value.length(); i++) {
             char ch = value.charAt(i);
-            switch (ch) {
-                case '\\': escaped.append("\\\\"); break;
-                case '\"': escaped.append("\\\""); break;
-                case '\n': escaped.append("\\n"); break;
-                case '\r': escaped.append("\\r"); break;
-                case '\t': escaped.append("\\t"); break;
-                case '\b': escaped.append("\\b"); break;
-                case '\f': escaped.append("\\f"); break;
-                default: escaped.append(ch);
-            }
+            escaped.append(switch (ch) {
+                case '\\' -> "\\\\";
+                case '\"' -> "\\\"";
+                case '\n' -> "\\n";
+                case '\r' -> "\\r";
+                case '\t' -> "\\t";
+                case '\b' -> "\\b";
+                case '\f' -> "\\f";
+                default -> String.valueOf(ch);
+            });
         }
         return escaped.append('\"').toString();
     }
@@ -291,8 +284,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             return false;
         }
         for (Expression argument : annotation.getArguments()) {
-            if (argument instanceof J.Assignment) {
-                J.Assignment assignment = (J.Assignment) argument;
+            if (argument instanceof J.Assignment assignment) {
                 if ("nativeQuery".equals(assignment.getVariable().toString())) {
                     return !J.Literal.isLiteralValue(assignment.getAssignment(), false);
                 }
@@ -302,7 +294,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     }
 
     private static List<Expression> mapExpressions(List<Expression> expressions,
-                                                    java.util.function.Function<Expression, Expression> mapper) {
+                                                   Function<Expression, Expression> mapper) {
         List<Expression> mapped = new ArrayList<>(expressions.size());
         for (Expression expression : expressions) {
             mapped.add(mapper.apply(expression));
@@ -334,12 +326,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             return null;
         }
         for (Expression argument : annotation.getArguments()) {
-            if (argument instanceof J.Assignment) {
-                J.Assignment assignment = (J.Assignment) argument;
-                if (name.equals(assignment.getVariable().toString()) && assignment.getAssignment() instanceof J.Literal) {
-                    Object value = ((J.Literal) assignment.getAssignment()).getValue();
-                    return value instanceof String ? (String) value : null;
-                }
+            if (argument instanceof J.Assignment assignment &&
+                    name.equals(assignment.getVariable().toString()) &&
+                    assignment.getAssignment() instanceof J.Literal literal &&
+                    literal.getValue() instanceof String value) {
+                return value;
             }
         }
         return null;
@@ -387,8 +378,8 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             @Override
             public J.Assignment visitAssignment(J.Assignment assignment, Integer ignored) {
                 J.Assignment a = super.visitAssignment(assignment, ignored);
-                if (a.getVariable() instanceof J.Identifier) {
-                    String variableName = ((J.Identifier) a.getVariable()).getSimpleName();
+                if (a.getVariable() instanceof J.Identifier identifier) {
+                    String variableName = identifier.getSimpleName();
                     if (variables.containsKey(variableName)) {
                         ambiguousVariables.add(variableName);
                     }
@@ -411,8 +402,8 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 J.Literal chainedQuery = findQueryLiteral(m.getSelect());
                 if (chainedQuery != null) {
                     queryId = chainedQuery.getId();
-                } else if (m.getSelect() instanceof J.Identifier) {
-                    String variableName = ((J.Identifier) m.getSelect()).getSimpleName();
+                } else if (m.getSelect() instanceof J.Identifier identifier) {
+                    String variableName = identifier.getSimpleName();
                     if (!ambiguousVariables.contains(variableName)) {
                         queryId = variables.get(variableName);
                     }
@@ -429,7 +420,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         return result;
     }
 
-    private static ParameterBindings springMethodBindings(org.openrewrite.Cursor cursor) {
+    private static ParameterBindings springMethodBindings(Cursor cursor) {
         J.MethodDeclaration method = cursor.firstEnclosing(J.MethodDeclaration.class);
         if (method == null) {
             return ParameterBindings.empty();
@@ -438,10 +429,9 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         ParameterBindings bindings = new ParameterBindings();
         int position = 0;
         for (Statement parameter : method.getParameters()) {
-            if (!(parameter instanceof J.VariableDeclarations)) {
+            if (!(parameter instanceof J.VariableDeclarations declarations)) {
                 continue;
             }
-            J.VariableDeclarations declarations = (J.VariableDeclarations) parameter;
             for (J.VariableDeclarations.NamedVariable variable : declarations.getVariables()) {
                 position++;
                 String name = variable.getSimpleName();
@@ -461,27 +451,24 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             return null;
         }
         for (Expression argument : annotation.getArguments()) {
-            if (argument instanceof J.Literal && ((J.Literal) argument).getValue() instanceof String) {
-                return (String) ((J.Literal) argument).getValue();
+            if (argument instanceof J.Literal literal && literal.getValue() instanceof String value) {
+                return value;
             }
-            if (argument instanceof J.Assignment &&
-                    ((J.Assignment) argument).getAssignment() instanceof J.Literal) {
-                Object value = ((J.Literal) ((J.Assignment) argument).getAssignment()).getValue();
-                if (value instanceof String) {
-                    return (String) value;
-                }
+            if (argument instanceof J.Assignment assignment &&
+                    assignment.getAssignment() instanceof J.Literal literal &&
+                    literal.getValue() instanceof String value) {
+                return value;
             }
         }
         return null;
     }
 
     private static J.Literal findQueryLiteral(Expression expression) {
-        if (!(expression instanceof J.MethodInvocation)) {
+        if (!(expression instanceof J.MethodInvocation method)) {
             return null;
         }
-        J.MethodInvocation method = (J.MethodInvocation) expression;
-        if (isQueryMethod(method) && !method.getArguments().isEmpty() && method.getArguments().get(0) instanceof J.Literal) {
-            J.Literal literal = (J.Literal) method.getArguments().get(0);
+        if (isQueryMethod(method) && !method.getArguments().isEmpty() &&
+                method.getArguments().get(0) instanceof J.Literal literal) {
             return literal.getValue() instanceof String ? literal : null;
         }
         return findQueryLiteral(method.getSelect());
@@ -493,15 +480,15 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     }
 
     private static String parameterKey(Expression expression) {
-        if (!(expression instanceof J.Literal)) {
+        if (!(expression instanceof J.Literal literal)) {
             return null;
         }
-        Object value = ((J.Literal) expression).getValue();
-        if (value instanceof String && !((String) value).isBlank()) {
-            return ":" + value;
+        Object value = literal.getValue();
+        if (value instanceof String name && !name.isBlank()) {
+            return ":" + name;
         }
-        if (value instanceof Number && ((Number) value).intValue() > 0) {
-            return "?" + ((Number) value).intValue();
+        if (value instanceof Number position && position.intValue() > 0) {
+            return "?" + position.intValue();
         }
         return null;
     }
@@ -610,7 +597,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
             BoundType bindingType = types.get(parameter);
             String idType = normalizedTypeName(identifierType);
-            return bindingType != null && bindingType.valueType.equals(idType);
+            return bindingType != null && bindingType.valueType().equals(idType);
         }
 
         boolean collectionElementsMatchIdentifier(String parameter, JavaType identifierType) {
@@ -619,12 +606,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
             BoundType bindingType = types.get(parameter);
             String idType = normalizedTypeName(identifierType);
-            return bindingType != null && bindingType.elementType != null && bindingType.elementType.equals(idType);
+            return bindingType != null && bindingType.elementType() != null && bindingType.elementType().equals(idType);
         }
 
         private static String normalizedTypeName(JavaType type) {
-            if (type instanceof JavaType.Primitive) {
-                JavaType.Primitive primitive = (JavaType.Primitive) type;
+            if (type instanceof JavaType.Primitive primitive) {
                 if (primitive == JavaType.Primitive.None || primitive == JavaType.Primitive.Null ||
                         primitive == JavaType.Primitive.Void) {
                     return null;
@@ -635,47 +621,23 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             return fullyQualified == null ? null : fullyQualified.getFullyQualifiedName();
         }
 
-        private static final class BoundType {
-            final String valueType;
-            final String elementType;
-
-            private BoundType(String valueType, String elementType) {
-                this.valueType = valueType;
-                this.elementType = elementType;
-            }
-
+        private record BoundType(String valueType, String elementType) {
             static BoundType from(JavaType type) {
-                if (type instanceof JavaType.Array) {
-                    String elementType = normalizedTypeName(((JavaType.Array) type).getElemType());
+                if (type instanceof JavaType.Array array) {
+                    String elementType = normalizedTypeName(array.getElemType());
                     return elementType == null ? null : new BoundType(elementType + "[]", elementType);
                 }
                 String valueType = normalizedTypeName(type);
                 if (valueType == null) {
                     return null;
                 }
-                if (type instanceof JavaType.Parameterized && TypeUtils.isAssignableTo("java.lang.Iterable", type)) {
-                    List<JavaType> parameters = ((JavaType.Parameterized) type).getTypeParameters();
+                if (type instanceof JavaType.Parameterized parameterized &&
+                        TypeUtils.isAssignableTo("java.lang.Iterable", parameterized)) {
+                    List<JavaType> parameters = parameterized.getTypeParameters();
                     String elementType = parameters.size() == 1 ? normalizedTypeName(parameters.get(0)) : null;
                     return new BoundType(valueType, elementType);
                 }
                 return new BoundType(valueType, null);
-            }
-
-            @Override
-            public boolean equals(Object other) {
-                if (this == other) {
-                    return true;
-                }
-                if (!(other instanceof BoundType)) {
-                    return false;
-                }
-                BoundType that = (BoundType) other;
-                return valueType.equals(that.valueType) && java.util.Objects.equals(elementType, that.elementType);
-            }
-
-            @Override
-            public int hashCode() {
-                return 31 * valueType.hashCode() + (elementType == null ? 0 : elementType.hashCode());
             }
         }
     }
@@ -686,15 +648,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         UNKNOWN
     }
 
-    private static final class PathResolution {
-        final PathKind kind;
-        final EntityInfo entity;
-
-        private PathResolution(PathKind kind, EntityInfo entity) {
-            this.kind = kind;
-            this.entity = entity;
-        }
-
+    private record PathResolution(PathKind kind, EntityInfo entity) {
         static PathResolution entity(EntityInfo entity) {
             return new PathResolution(PathKind.ENTITY, entity);
         }
@@ -708,14 +662,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         }
     }
 
-    private static final class Insertion {
-        final int offset;
-        final String text;
-
-        private Insertion(int offset, String text) {
-            this.offset = offset;
-            this.text = text;
-        }
+    private record Insertion(int offset, String text) {
     }
 
     private static final class HqlRewriter {
@@ -756,13 +703,13 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 return hql;
             }
 
-            insertions.sort((left, right) -> Integer.compare(right.offset, left.offset));
+            insertions.sort((left, right) -> Integer.compare(right.offset(), left.offset()));
             StringBuilder rewritten = new StringBuilder(hql);
             int previousOffset = -1;
             for (Insertion insertion : insertions) {
-                if (insertion.offset != previousOffset) {
-                    rewritten.insert(insertion.offset, insertion.text);
-                    previousOffset = insertion.offset;
+                if (insertion.offset() != previousOffset) {
+                    rewritten.insert(insertion.offset(), insertion.text());
+                    previousOffset = insertion.offset();
                 }
             }
             return rewritten.toString();
@@ -808,16 +755,15 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
         @Override
         public void enterJoin(HqlParser.JoinContext ctx) {
-            if (!(ctx.joinTarget() instanceof HqlParser.JoinPathContext)) {
+            if (!(ctx.joinTarget() instanceof HqlParser.JoinPathContext join)) {
                 return;
             }
-            HqlParser.JoinPathContext join = (HqlParser.JoinPathContext) ctx.joinTarget();
             if (join.variable() == null) {
                 return;
             }
             PathResolution joined = resolvePath(join.path().getText(), aliases, acc);
-            if (joined.kind == PathKind.ENTITY) {
-                aliases.put(variableName(join.variable()).toLowerCase(Locale.ROOT), joined.entity);
+            if (joined.kind() == PathKind.ENTITY) {
+                aliases.put(variableName(join.variable()).toLowerCase(Locale.ROOT), joined.entity());
             }
         }
 
@@ -855,11 +801,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             PathResolution leftPath = resolvePath(left, aliases, acc);
             PathResolution rightPath = resolvePath(right, aliases, acc);
 
-            if (leftPath.kind == PathKind.ENTITY && isScalar(right, rightPath, leftPath.entity, bindings, acc)) {
-                addIdentifier(leftExpression, leftPath.entity);
+            if (leftPath.kind() == PathKind.ENTITY && isScalar(right, rightPath, leftPath.entity(), bindings, acc)) {
+                addIdentifier(leftExpression, leftPath.entity());
             }
-            if (rightPath.kind == PathKind.ENTITY && isScalar(left, leftPath, rightPath.entity, bindings, acc)) {
-                addIdentifier(rightExpression, rightPath.entity);
+            if (rightPath.kind() == PathKind.ENTITY && isScalar(left, leftPath, rightPath.entity(), bindings, acc)) {
+                addIdentifier(rightExpression, rightPath.entity());
             }
         }
 
@@ -871,10 +817,10 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
             String tested = source(testedExpression);
             PathResolution testedPath = resolvePath(tested, aliases, acc);
-            if (testedPath.kind != PathKind.ENTITY || !inListMatchesIdentifier(ctx.inList(), testedPath.entity)) {
+            if (testedPath.kind() != PathKind.ENTITY || !inListMatchesIdentifier(ctx.inList(), testedPath.entity())) {
                 return;
             }
-            addIdentifier(testedExpression, testedPath.entity);
+            addIdentifier(testedExpression, testedPath.entity());
         }
 
         private boolean inListMatchesIdentifier(HqlParser.InListContext inList, EntityInfo entity) {
@@ -882,16 +828,15 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             if (identifierType == null) {
                 return false;
             }
-            if (inList instanceof HqlParser.ParamInListContext) {
-                String parameter = ((HqlParser.ParamInListContext) inList).parameter().getText();
+            if (inList instanceof HqlParser.ParamInListContext parameterList) {
+                String parameter = parameterList.parameter().getText();
                 return bindings.collectionElementsMatchIdentifier(parameter, identifierType);
             }
-            if (!(inList instanceof HqlParser.ExplicitTupleInListContext)) {
+            if (!(inList instanceof HqlParser.ExplicitTupleInListContext tuple)) {
                 return false;
             }
 
-            List<HqlParser.ExpressionOrPredicateContext> items =
-                    ((HqlParser.ExplicitTupleInListContext) inList).expressionOrPredicate();
+            List<HqlParser.ExpressionOrPredicateContext> items = tuple.expressionOrPredicate();
             if (items.isEmpty()) {
                 return false;
             }
@@ -944,7 +889,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         if (PARAMETER.matcher(candidate).matches()) {
             return bindings.matchesIdentifier(candidate, acc.identifierType(comparedEntity));
         }
-        return path.kind == PathKind.SCALAR || NUMBER.matcher(candidate).matches() || isQuoted(candidate) ||
+        return path.kind() == PathKind.SCALAR || NUMBER.matcher(candidate).matches() || isQuoted(candidate) ||
                 "true".equalsIgnoreCase(candidate) || "false".equalsIgnoreCase(candidate) ||
                 "null".equalsIgnoreCase(candidate);
     }
