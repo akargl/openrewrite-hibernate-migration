@@ -1,0 +1,8 @@
+---
+type: specs.openrewrite.org/v1beta/recipe
+name: org.openrewrite.contrib.hibernate.MigrateHibernate5To6Queries
+displayName: Migrate Hibernate 5 queries to Hibernate 6
+description: >-
+  Applies query migrations required when moving from Hibernate 5 to Hibernate 6.
+recipeList:
+  - org.openrewrite.contrib.hibernate.UseEntityIdInHqlComparison
