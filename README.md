@@ -46,28 +46,11 @@ To run only the entity-ID recipe, use:
 com.akargl.openrewrite.hibernate.UseEntityIdInHqlComparison
 ```
 
-The examples below use OpenRewrite Gradle plugin `7.41.0` and Maven plugin `6.47.0`. OpenRewrite currently distributes its plugins through the [Code Genome Project repository](https://docs.openrewrite.org/running-recipes/getting-started), which requires download credentials. If that repository is already configured globally or mirrored internally, retain that configuration instead of duplicating it.
+The credential-free examples below use OpenRewrite Gradle plugin `7.41.0` from the Gradle Plugin Portal and Maven plugin `6.46.1` from Maven Central. These pinned public versions avoid requiring a Code Genome Project account.
 
 ## Run from a Gradle build
 
-Make the OpenRewrite plugin available in the target project's `settings.gradle.kts`:
-
-```kotlin
-pluginManagement {
-    repositories {
-        maven {
-            url = uri("https://artifacts.codegenomeproject.org/maven")
-            credentials {
-                username = providers.gradleProperty("codeGenomeUsername").get()
-                password = providers.gradleProperty("codeGenomeToken").get()
-            }
-        }
-        gradlePluginPortal()
-    }
-}
-```
-
-Store `codeGenomeUsername` and `codeGenomeToken` in `~/.gradle/gradle.properties`, not in the project. Then add the following to the target project's `build.gradle.kts`:
+Add the following to the target project's `build.gradle.kts`. Gradle uses the public Plugin Portal for the plugin and the local Maven repository for the recipe:
 
 ```kotlin
 plugins {
@@ -77,13 +60,6 @@ plugins {
 repositories {
     mavenLocal()
     mavenCentral()
-    maven {
-        url = uri("https://artifacts.codegenomeproject.org/maven")
-        credentials {
-            username = providers.gradleProperty("codeGenomeUsername").get()
-            password = providers.gradleProperty("codeGenomeToken").get()
-        }
-    }
 }
 
 dependencies {
@@ -113,7 +89,7 @@ Add the OpenRewrite plugin to the target project's `pom.xml`:
 <plugin>
     <groupId>org.openrewrite.maven</groupId>
     <artifactId>rewrite-maven-plugin</artifactId>
-    <version>6.47.0</version>
+    <version>6.46.1</version>
     <configuration>
         <activeRecipes>
             <recipe>com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries</recipe>
@@ -129,7 +105,7 @@ Add the OpenRewrite plugin to the target project's `pom.xml`:
 </plugin>
 ```
 
-Configure the Code Genome repository in Maven as described in the [OpenRewrite Maven setup guide](https://docs.openrewrite.org/running-recipes/getting-started), then preview and apply the recipe:
+The plugin is resolved from Maven Central and the recipe from the local Maven repository, so no additional Maven repository or credentials are required. Preview and apply the recipe:
 
 ```shell
 mvn rewrite:dryRun
@@ -143,28 +119,15 @@ The recipe must still be published locally first with `./gradlew publishToMavenL
 
 ### Standalone Gradle invocation
 
-Export Code Genome credentials because Gradle init scripts cannot read the target project's `gradle.properties`:
-
-```shell
-export CODE_GENOME_USERNAME='you@example.com'
-export CODE_GENOME_TOKEN='your-download-token'
-```
-
 Create an `init.gradle.kts` file outside the target repository so it can be reused:
 
 ```kotlin
 initscript {
     repositories {
-        maven {
-            url = uri("https://artifacts.codegenomeproject.org/maven")
-            credentials {
-                username = System.getenv("CODE_GENOME_USERNAME")
-                password = System.getenv("CODE_GENOME_TOKEN")
-            }
-        }
+        gradlePluginPortal()
     }
     dependencies {
-        classpath("org.openrewrite:plugin:7.41.0")
+        classpath("org.openrewrite.rewrite:org.openrewrite.rewrite.gradle.plugin:7.41.0")
     }
 }
 
@@ -182,13 +145,6 @@ rootProject {
         repositories {
             mavenLocal()
             mavenCentral()
-            maven {
-                url = uri("https://artifacts.codegenomeproject.org/maven")
-                credentials {
-                    username = System.getenv("CODE_GENOME_USERNAME")
-                    password = System.getenv("CODE_GENOME_TOKEN")
-                }
-            }
         }
     }
 }
@@ -208,12 +164,10 @@ Do not combine this init-script setup with an existing `rewrite { ... }` block i
 
 ### Standalone Maven invocation
 
-The Code Genome repository must be available as both a `<repository>` and `<pluginRepository>` in `~/.m2/settings.xml`; the target `pom.xml` remains untouched. See OpenRewrite's [standalone Maven guide](https://docs.openrewrite.org/running-recipes/running-rewrite-on-a-maven-project-without-modifying-the-build) for the credential configuration.
-
-From the target Maven project, preview the recipe:
+Maven resolves plugin `6.46.1` from Maven Central and the recipe from the local Maven repository. No `settings.xml` changes or credentials are required. From the target Maven project, preview the recipe:
 
 ```shell
-mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.47.0:dryRun \
+mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.46.1:dryRun \
   -Drewrite.recipeArtifactCoordinates=com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT \
   -Drewrite.activeRecipes=com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 ```
@@ -221,9 +175,13 @@ mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.47.0:dryRun \
 Apply it:
 
 ```shell
-mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.47.0:run \
+mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.46.1:run \
   -Drewrite.recipeArtifactCoordinates=com.akargl.openrewrite:openrewrite-hibernate-migration:0.1.0-SNAPSHOT \
   -Drewrite.activeRecipes=com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries
 ```
 
 Always review the generated patch or `git diff` before committing the changes.
+
+## Optional: use newer Code Genome releases
+
+OpenRewrite is moving newer releases to the authenticated Code Genome Project repository. Use it only when a required plugin or OpenRewrite module is no longer available from the Gradle Plugin Portal or Maven Central, or when an organization already mirrors Code Genome internally. In that case, follow OpenRewrite's [repository and credential setup](https://docs.openrewrite.org/running-recipes/getting-started) and update the pinned plugin version deliberately.
