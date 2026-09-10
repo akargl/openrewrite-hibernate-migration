@@ -206,10 +206,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 var arguments = new ArrayList<>(m.getArguments());
                 Map<UUID, ParameterBindings> byQuery = getCursor().getNearestMessage(IMPERATIVE_BINDINGS);
                 ParameterBindings bindings = ParameterBindings.empty();
-                if (arguments.getFirst() instanceof J.Literal literal && byQuery != null) {
-                    bindings = byQuery.getOrDefault(literal.getId(), bindings);
+                StaticQuery staticQuery = staticQuery(arguments.getFirst());
+                if (staticQuery != null && byQuery != null) {
+                    bindings = byQuery.getOrDefault(staticQuery.anchorId(), bindings);
                 }
-                arguments.set(0, rewriteLiteral(
+                arguments.set(0, rewriteStaticQuery(
                         arguments.getFirst(), acc, bindings, ctx, sourcePath(getCursor()), m.getSimpleName() + "(...)"
                 ));
                 return m.withArguments(arguments);
@@ -318,32 +319,107 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     private Expression rewriteQueryAttribute(Expression expression, Accumulator acc, ParameterBindings bindings,
                                                ExecutionContext ctx, String sourcePath, String querySource) {
         return switch (expression) {
-            case J.Literal literal -> rewriteLiteral(literal, acc, bindings, ctx, sourcePath, querySource);
+            case J.Literal literal -> rewriteStaticQuery(literal, acc, bindings, ctx, sourcePath, querySource);
+            case J.Binary binary -> rewriteStaticQuery(binary, acc, bindings, ctx, sourcePath, querySource);
             case J.Assignment assignment when "query".equals(assignment.getVariable().toString()) ||
                     "value".equals(assignment.getVariable().toString()) ->
-                    assignment.withAssignment(rewriteLiteral(
+                    assignment.withAssignment(rewriteStaticQuery(
                             assignment.getAssignment(), acc, bindings, ctx, sourcePath, querySource
                     ));
             default -> expression;
         };
     }
 
-    private Expression rewriteLiteral(Expression expression, Accumulator acc, ParameterBindings bindings,
-                                      ExecutionContext ctx, String sourcePath, String querySource) {
-        if (!(expression instanceof J.Literal literal) || !(literal.getValue() instanceof String query)) {
+    private Expression rewriteStaticQuery(Expression expression, Accumulator acc, ParameterBindings bindings,
+                                          ExecutionContext ctx, String sourcePath, String querySource) {
+        StaticQuery staticQuery = staticQuery(expression);
+        if (staticQuery == null) {
             return expression;
         }
+        String query = staticQuery.query();
         QueryAnalysis analysis = HqlRewriter.analyze(query, acc, bindings);
         String rewritten = analysis.rewrittenQuery();
         queryAnalysis.insertRow(ctx, new HqlQueryAnalysis.Row(
                 sourcePath, querySource, analysis.outcome(), analysis.reason(), query, rewritten
         ));
         if (query.equals(rewritten)) {
-            return literal;
+            return expression;
         }
-        return literal.withValue(rewritten).withValueSource(
-                renderStringLiteral(literal.getValueSource(), rewritten, acc, bindings)
-        );
+        return applyInsertions(expression, staticQuery, analysis.insertions(), acc, bindings);
+    }
+
+    private static StaticQuery staticQuery(Expression expression) {
+        List<LiteralSegment> segments = new ArrayList<>();
+        if (!collectStringLiterals(expression, segments) || segments.isEmpty()) {
+            return null;
+        }
+        if (segments.size() > 1 && segments.stream().anyMatch(LiteralSegment::textBlock)) {
+            return null;
+        }
+        StringBuilder query = new StringBuilder();
+        List<LiteralSegment> positioned = new ArrayList<>(segments.size());
+        for (LiteralSegment segment : segments) {
+            int start = query.length();
+            query.append(segment.value());
+            positioned.add(segment.withRange(start, query.length()));
+        }
+        return new StaticQuery(positioned.getFirst().id(), query.toString(), positioned);
+    }
+
+    private static boolean collectStringLiterals(Expression expression, List<LiteralSegment> segments) {
+        return switch (expression) {
+            case J.Literal literal when literal.getValue() instanceof String value -> {
+                String valueSource = literal.getValueSource();
+                segments.add(new LiteralSegment(
+                        literal.getId(), value, 0, 0, valueSource != null && valueSource.startsWith("\"\"\"")
+                ));
+                yield true;
+            }
+            case J.Binary binary when binary.getOperator() == J.Binary.Type.Addition -> {
+                int originalSize = segments.size();
+                boolean valid = collectStringLiterals(binary.getLeft(), segments) &&
+                        collectStringLiterals(binary.getRight(), segments);
+                if (!valid) {
+                    segments.subList(originalSize, segments.size()).clear();
+                }
+                yield valid;
+            }
+            default -> false;
+        };
+    }
+
+    private static Expression applyInsertions(Expression expression, StaticQuery query, List<Insertion> insertions,
+                                              Accumulator acc, ParameterBindings bindings) {
+        Map<UUID, List<Insertion>> byLiteral = new HashMap<>();
+        for (Insertion insertion : insertions) {
+            LiteralSegment segment = query.segmentAt(insertion.offset());
+            if (segment != null) {
+                byLiteral.computeIfAbsent(segment.id(), unused -> new ArrayList<>())
+                        .add(new Insertion(insertion.offset() - segment.start(), insertion.text()));
+            }
+        }
+        return applyLiteralInsertions(expression, byLiteral, acc, bindings);
+    }
+
+    private static Expression applyLiteralInsertions(Expression expression, Map<UUID, List<Insertion>> insertions,
+                                                     Accumulator acc, ParameterBindings bindings) {
+        return switch (expression) {
+            case J.Literal literal when literal.getValue() instanceof String value &&
+                    insertions.containsKey(literal.getId()) -> {
+                StringBuilder rewritten = new StringBuilder(value);
+                insertions.get(literal.getId()).stream()
+                        .sorted((left, right) -> Integer.compare(right.offset(), left.offset()))
+                        .forEach(insertion -> rewritten.insert(insertion.offset(), insertion.text()));
+                String newValue = rewritten.toString();
+                yield literal.withValue(newValue).withValueSource(
+                        renderStringLiteral(literal.getValueSource(), newValue, acc, bindings)
+                );
+            }
+            case J.Binary binary when binary.getOperator() == J.Binary.Type.Addition -> binary
+                    .withLeft(applyLiteralInsertions(binary.getLeft(), insertions, acc, bindings))
+                    .withRight(applyLiteralInsertions(binary.getRight(), insertions, acc, bindings));
+            default -> expression;
+        };
     }
 
     private static String renderStringLiteral(String oldValueSource, String value, Accumulator acc,
@@ -461,10 +537,10 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             public J.VariableDeclarations.NamedVariable visitVariable(
                     J.VariableDeclarations.NamedVariable variable, Integer ignored) {
                 J.VariableDeclarations.NamedVariable v = super.visitVariable(variable, ignored);
-                J.Literal query = findQueryLiteral(v.getInitializer());
-                if (query != null) {
-                    UUID previous = variables.putIfAbsent(v.getSimpleName(), query.getId());
-                    if (previous != null && !previous.equals(query.getId())) {
+                UUID queryId = findQueryId(v.getInitializer());
+                if (queryId != null) {
+                    UUID previous = variables.putIfAbsent(v.getSimpleName(), queryId);
+                    if (previous != null && !previous.equals(queryId)) {
                         ambiguousVariables.add(v.getSimpleName());
                     }
                 }
@@ -495,9 +571,9 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 }
 
                 UUID queryId = null;
-                J.Literal chainedQuery = findQueryLiteral(m.getSelect());
-                if (chainedQuery != null) {
-                    queryId = chainedQuery.getId();
+                UUID chainedQueryId = findQueryId(m.getSelect());
+                if (chainedQueryId != null) {
+                    queryId = chainedQueryId;
                 } else if (m.getSelect() instanceof J.Identifier identifier) {
                     String variableName = identifier.getSimpleName();
                     if (!ambiguousVariables.contains(variableName)) {
@@ -587,15 +663,15 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         return null;
     }
 
-    private static J.Literal findQueryLiteral(Expression expression) {
+    private static UUID findQueryId(Expression expression) {
         if (!(expression instanceof J.MethodInvocation method)) {
             return null;
         }
-        if (isQueryMethod(method) && !method.getArguments().isEmpty() &&
-                method.getArguments().getFirst() instanceof J.Literal literal) {
-            return literal.getValue() instanceof String ? literal : null;
+        if (isQueryMethod(method) && !method.getArguments().isEmpty()) {
+            StaticQuery query = staticQuery(method.getArguments().getFirst());
+            return query == null ? null : query.anchorId();
         }
-        return findQueryLiteral(method.getSelect());
+        return findQueryId(method.getSelect());
     }
 
     private static boolean isQueryMethod(J.MethodInvocation method) {
@@ -815,7 +891,28 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     private record Insertion(int offset, String text) {
     }
 
-    private record QueryAnalysis(String rewrittenQuery, String outcome, String reason) {
+    private record LiteralSegment(UUID id, String value, int start, int end, boolean textBlock) {
+        LiteralSegment withRange(int newStart, int newEnd) {
+            return new LiteralSegment(id, value, newStart, newEnd, textBlock);
+        }
+    }
+
+    private record StaticQuery(UUID anchorId, String query, List<LiteralSegment> segments) {
+        LiteralSegment segmentAt(int offset) {
+            for (LiteralSegment segment : segments) {
+                if ((offset > segment.start() && offset <= segment.end()) ||
+                        (offset == 0 && segment.start() == 0)) {
+                    return segment;
+                }
+            }
+            return null;
+        }
+    }
+
+    private record QueryAnalysis(String rewrittenQuery, String outcome, String reason, List<Insertion> insertions) {
+        QueryAnalysis(String rewrittenQuery, String outcome, String reason) {
+            this(rewrittenQuery, outcome, reason, List.of());
+        }
     }
 
     private static final class HqlRewriter {
@@ -877,7 +974,8 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
             return new QueryAnalysis(
                     rewritten.toString(), "CHANGED",
-                    "Added an explicit identifier to " + insertions.size() + " entity-valued operand(s)."
+                    "Added an explicit identifier to " + insertions.size() + " entity-valued operand(s).",
+                    List.copyOf(insertions)
             );
         }
     }
@@ -944,6 +1042,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             PathResolution joined = resolvePath(join.path().getText(), aliases, acc);
             if (joined.kind() == PathKind.ENTITY) {
                 aliases.put(variableName(join.variable()).toLowerCase(Locale.ROOT), joined.entity());
+                return;
+            }
+            EntityInfo joinedEntity = acc.entityByQueryName(join.path().getText());
+            if (joinedEntity != null) {
+                aliases.put(variableName(join.variable()).toLowerCase(Locale.ROOT), joinedEntity);
             }
         }
 

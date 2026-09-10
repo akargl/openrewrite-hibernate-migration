@@ -94,6 +94,80 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
     }
 
     @Test
+    void rewritesEntityAssociationsInsideAConcatenatedQuery() {
+        rewriteRun(
+          spec -> spec.dataTable(HqlQueryAnalysis.Row.class, rows -> {
+              assertEquals(1, rows.size());
+              assertEquals("CHANGED", rows.getFirst().outcome());
+              assertTrue(rows.getFirst().originalQuery().contains("rule.mode = 3"));
+              assertTrue(rows.getFirst().rewrittenQuery().contains("rule.mode.id = 3"));
+              assertTrue(rows.getFirst().rewrittenQuery().contains("rule.category.id IN"));
+          }),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+              import jakarta.persistence.ManyToOne;
+              import java.math.BigDecimal;
+
+              @Entity class ServiceRecord { @Id Long id; }
+              @Entity class ProductRecord { @Id Long id; }
+              @Entity class ModeReference { @Id Integer id; }
+              @Entity class CategoryReference { @Id Integer id; }
+
+              @Entity
+              class LineItem {
+                  @Id Long id;
+                  BigDecimal netValue;
+                  @ManyToOne ServiceRecord service;
+                  @ManyToOne ProductRecord product;
+              }
+
+              @Entity
+              class PricingRule {
+                  @Id Long id;
+                  @ManyToOne ModeReference mode;
+                  @ManyToOne CategoryReference category;
+                  int required;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.List;
+
+              class Queries {
+                  List<Object[]> run(EntityManager entityManager, Long previousServiceId) {
+                      return entityManager.createQuery("SELECT rule, item.netValue FROM ServiceRecord service JOIN LineItem item ON service.id = item.service.id JOIN PricingRule rule ON item.product.id = rule.id "
+                              + "WHERE rule.mode = 3 AND rule.category IN (99,100,101,131,132,133,134,135,136)AND rule.required = 1 AND service.id =:previousServiceId", Object[].class)
+                              .setParameter("previousServiceId", previousServiceId).getResultList();
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+              import java.util.List;
+
+              class Queries {
+                  List<Object[]> run(EntityManager entityManager, Long previousServiceId) {
+                      return entityManager.createQuery("SELECT rule, item.netValue FROM ServiceRecord service JOIN LineItem item ON service.id = item.service.id JOIN PricingRule rule ON item.product.id = rule.id "
+                              + "WHERE rule.mode.id = 3 AND rule.category.id IN (99,100,101,131,132,133,134,135,136)AND rule.required = 1 AND service.id =:previousServiceId", Object[].class)
+                              .setParameter("previousServiceId", previousServiceId).getResultList();
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
     void rewritesRootAliasComparedWithLiteralAndBoundScalarParameter() {
         rewriteRun(
           java(

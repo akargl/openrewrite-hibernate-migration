@@ -15,13 +15,13 @@ The recipe discovers `@Entity`, `@MappedSuperclass`, `@Id`, and entity associati
 
 OpenRewrite exposes full bytecode metadata only for dependency types used by the module; its source-set inventory contains only the remaining class names. An entity mentioned exclusively as text in HQL cannot be inspected safely, and is left unchanged. Compiled type metadata also does not expose the value of a custom `@Entity(name = "...")`, so dependency entities with a custom HQL name must also be referenced by their default simple or fully qualified class name to be resolved.
 
-The recipe supports Java string literals and text blocks used by JPA/Hibernate query creation methods, JPA/Hibernate `@NamedQuery`, and Spring Data JPA `@Query`.
+The recipe supports Java string literals, text blocks, and compile-time concatenations of ordinary string literals used by JPA/Hibernate query creation methods, JPA/Hibernate `@NamedQuery`, and Spring Data JPA `@Query`.
 
 HQL parameters are not assumed to be identifiers. A parameter comparison is changed only when the recipe can prove that the Java value bound through `setParameter(...)`, or declared by a Spring Data repository method, has the same type as the entity identifier. Explicit Hibernate `Class` arguments are used to type otherwise untyped `null` bindings. Unbound parameters, entity-typed parameters, conflicting bindings, and parameterized named queries without an analyzable binding are left unchanged.
 
 `IN` and `NOT IN` predicates are supported for compatible generic collections (including covariant bounds), arrays, literal lists, individually bound scalar parameters, and Hibernate `setParameterList(...)` bindings. An explicit element class on `setParameterList(...)` can make a raw collection safe to analyze; raw collections without that information, unknown element types, and collections of entities are left unchanged.
 
-To avoid unsafe changes, it skips native SQL, dynamic string construction, ambiguous entity names, malformed HQL, unresolved paths, composite identifiers, and comparisons with `null`.
+To avoid unsafe changes, it skips native SQL, runtime-dependent string construction, ambiguous entity names, malformed HQL, unresolved paths, composite identifiers, and comparisons with `null`.
 
 ## Build and publish locally
 
