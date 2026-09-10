@@ -6,6 +6,8 @@ import org.openrewrite.test.RecipeSpec;
 import org.openrewrite.test.RewriteTest;
 
 import static org.openrewrite.java.Assertions.java;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class UseEntityIdInHqlComparisonTest implements RewriteTest {
     @Override
@@ -977,6 +979,78 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
                       entityManager.createQuery("from MyEntity a where a in (:id, :entity)")
                               .setParameter("id", id)
                               .setParameter("entity", entity);
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void reportsEveryInspectedQueryWithItsOutcome() {
+        rewriteRun(
+          spec -> spec.dataTable(HqlQueryAnalysis.Row.class, rows -> {
+              assertEquals(3, rows.size());
+
+              HqlQueryAnalysis.Row changed = rows.stream()
+                      .filter(row -> row.originalQuery().contains("a = 1"))
+                      .findFirst()
+                      .orElseThrow();
+              assertEquals("CHANGED", changed.outcome());
+              assertEquals("from MyEntity a where a.id = 1", changed.rewrittenQuery());
+
+              HqlQueryAnalysis.Row unbound = rows.stream()
+                      .filter(row -> row.originalQuery().contains(":unbound"))
+                      .findFirst()
+                      .orElseThrow();
+              assertEquals("UNCHANGED", unbound.outcome());
+              assertTrue(unbound.reason().contains("unbound, ambiguous, or does not match"));
+
+              HqlQueryAnalysis.Row invalid = rows.stream()
+                      .filter(row -> row.originalQuery().endsWith("a ="))
+                      .findFirst()
+                      .orElseThrow();
+              assertEquals("SKIPPED", invalid.outcome());
+              assertTrue(invalid.reason().startsWith("Invalid HQL:"));
+          }),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.Entity;
+              import jakarta.persistence.Id;
+
+              @Entity
+              class MyEntity {
+                  @Id
+                  Long id;
+              }
+              """
+          ),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+
+              class Queries {
+                  void run(EntityManager entityManager) {
+                      entityManager.createQuery("from MyEntity a where a = 1");
+                      entityManager.createQuery("from MyEntity a where a = :unbound");
+                      entityManager.createQuery("from MyEntity a where a =");
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+
+              class Queries {
+                  void run(EntityManager entityManager) {
+                      entityManager.createQuery("from MyEntity a where a.id = 1");
+                      entityManager.createQuery("from MyEntity a where a = :unbound");
+                      entityManager.createQuery("from MyEntity a where a =");
                   }
               }
               """

@@ -38,6 +38,8 @@ import java.util.regex.Pattern;
  * Makes the identifier property explicit when an HQL entity-valued path is compared with a scalar.
  */
 public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlComparison.Accumulator> {
+    private final transient HqlQueryAnalysis queryAnalysis = new HqlQueryAnalysis(this);
+
     private static final String JAKARTA_ENTITY = "jakarta.persistence.Entity";
     private static final String JAVAX_ENTITY = "javax.persistence.Entity";
     private static final String JAKARTA_MAPPED_SUPERCLASS = "jakarta.persistence.MappedSuperclass";
@@ -174,8 +176,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 }
                 ParameterBindings bindings = "org.springframework.data.jpa.repository.Query".equals(annotationType) ?
                         springMethodBindings(getCursor()) : ParameterBindings.empty();
+                String querySource = "@" + a.getSimpleName();
                 return a.withArguments(mapExpressions(
-                        arguments, expression -> rewriteQueryAttribute(expression, acc, bindings)
+                        arguments, expression -> rewriteQueryAttribute(
+                                expression, acc, bindings, ctx, sourcePath(getCursor()), querySource
+                        )
                 ));
             }
 
@@ -193,7 +198,9 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 if (arguments.getFirst() instanceof J.Literal literal && byQuery != null) {
                     bindings = byQuery.getOrDefault(literal.getId(), bindings);
                 }
-                arguments.set(0, rewriteLiteral(arguments.getFirst(), acc, bindings));
+                arguments.set(0, rewriteLiteral(
+                        arguments.getFirst(), acc, bindings, ctx, sourcePath(getCursor()), m.getSimpleName() + "(...)"
+                ));
                 return m.withArguments(arguments);
             }
         };
@@ -232,21 +239,29 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         }
     }
 
-    private static Expression rewriteQueryAttribute(Expression expression, Accumulator acc, ParameterBindings bindings) {
+    private Expression rewriteQueryAttribute(Expression expression, Accumulator acc, ParameterBindings bindings,
+                                               ExecutionContext ctx, String sourcePath, String querySource) {
         return switch (expression) {
-            case J.Literal literal -> rewriteLiteral(literal, acc, bindings);
+            case J.Literal literal -> rewriteLiteral(literal, acc, bindings, ctx, sourcePath, querySource);
             case J.Assignment assignment when "query".equals(assignment.getVariable().toString()) ||
                     "value".equals(assignment.getVariable().toString()) ->
-                    assignment.withAssignment(rewriteLiteral(assignment.getAssignment(), acc, bindings));
+                    assignment.withAssignment(rewriteLiteral(
+                            assignment.getAssignment(), acc, bindings, ctx, sourcePath, querySource
+                    ));
             default -> expression;
         };
     }
 
-    private static Expression rewriteLiteral(Expression expression, Accumulator acc, ParameterBindings bindings) {
+    private Expression rewriteLiteral(Expression expression, Accumulator acc, ParameterBindings bindings,
+                                      ExecutionContext ctx, String sourcePath, String querySource) {
         if (!(expression instanceof J.Literal literal) || !(literal.getValue() instanceof String query)) {
             return expression;
         }
-        String rewritten = HqlRewriter.rewrite(query, acc, bindings);
+        QueryAnalysis analysis = HqlRewriter.analyze(query, acc, bindings);
+        String rewritten = analysis.rewrittenQuery();
+        queryAnalysis.insertRow(ctx, new HqlQueryAnalysis.Row(
+                sourcePath, querySource, analysis.outcome(), analysis.reason(), query, rewritten
+        ));
         if (query.equals(rewritten)) {
             return literal;
         }
@@ -259,7 +274,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                                               ParameterBindings bindings) {
         if (oldValueSource != null && oldValueSource.startsWith("\"\"\"")) {
             String sourceBody = oldValueSource.substring(3, oldValueSource.length() - 3);
-            return "\"\"\"" + HqlRewriter.rewrite(sourceBody, acc, bindings) + "\"\"\"";
+            return "\"\"\"" + HqlRewriter.analyze(sourceBody, acc, bindings).rewrittenQuery() + "\"\"\"";
         }
         StringBuilder escaped = new StringBuilder(value.length() + 2).append('\"');
         for (int i = 0; i < value.length(); i++) {
@@ -276,6 +291,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             });
         }
         return escaped.append('\"').toString();
+    }
+
+    private static String sourcePath(Cursor cursor) {
+        J.CompilationUnit compilationUnit = cursor.firstEnclosing(J.CompilationUnit.class);
+        return compilationUnit == null ? "" : compilationUnit.getSourcePath().toString();
     }
 
     private static boolean shouldSkipSpringQuery(J.Annotation annotation) {
@@ -710,11 +730,14 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     private record Insertion(int offset, String text) {
     }
 
+    private record QueryAnalysis(String rewrittenQuery, String outcome, String reason) {
+    }
+
     private static final class HqlRewriter {
         private HqlRewriter() {
         }
 
-        static String rewrite(String hql, Accumulator acc, ParameterBindings bindings) {
+        static QueryAnalysis analyze(String hql, Accumulator acc, ParameterBindings bindings) {
             HqlLexer lexer = new HqlLexer(CharStreams.fromString(hql));
             CommonTokenStream tokens = new CommonTokenStream(lexer);
             HqlParser parser = new HqlParser(tokens);
@@ -728,24 +751,34 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             try {
                 statement = parser.statement();
             } catch (RuntimeException ignored) {
-                return hql;
+                return new QueryAnalysis(hql, "SKIPPED", "The HQL parser threw an exception.");
             }
             if (errors.failed) {
-                return hql;
+                return new QueryAnalysis(hql, "SKIPPED", "Invalid HQL: " + errors.firstMessage);
             }
 
             UnsupportedStructureDetector unsupported = new UnsupportedStructureDetector();
             ParseTreeWalker.DEFAULT.walk(unsupported, statement);
             if (unsupported.found) {
-                return hql;
+                return new QueryAnalysis(
+                        hql, "SKIPPED", "Subqueries and set operations are skipped because alias scopes are ambiguous."
+                );
             }
 
             Map<String, EntityInfo> aliases = new HashMap<>();
-            ParseTreeWalker.DEFAULT.walk(new AliasCollector(acc, aliases), statement);
+            Set<String> reasons = new LinkedHashSet<>();
+            ParseTreeWalker.DEFAULT.walk(new AliasCollector(acc, aliases, reasons), statement);
             List<Insertion> insertions = new ArrayList<>();
-            ParseTreeWalker.DEFAULT.walk(new ComparisonCollector(acc, aliases, bindings, hql, insertions), statement);
+            ParseTreeWalker.DEFAULT.walk(
+                    new ComparisonCollector(acc, aliases, bindings, hql, insertions, reasons), statement
+            );
             if (insertions.isEmpty()) {
-                return hql;
+                if (reasons.isEmpty()) {
+                    reasons.add(aliases.isEmpty() ?
+                            "No entity aliases could be resolved from Java source scanned in this run." :
+                            "No entity-valued equality or IN comparison requiring an identifier was found.");
+                }
+                return new QueryAnalysis(hql, "UNCHANGED", String.join(" ", reasons));
             }
 
             insertions.sort((left, right) -> Integer.compare(right.offset(), left.offset()));
@@ -757,7 +790,10 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                     previousOffset = insertion.offset();
                 }
             }
-            return rewritten.toString();
+            return new QueryAnalysis(
+                    rewritten.toString(), "CHANGED",
+                    "Added an explicit identifier to " + insertions.size() + " entity-valued operand(s)."
+            );
         }
     }
 
@@ -782,10 +818,12 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     private static final class AliasCollector extends HqlParserBaseListener {
         private final Accumulator acc;
         private final Map<String, EntityInfo> aliases;
+        private final Set<String> reasons;
 
-        private AliasCollector(Accumulator acc, Map<String, EntityInfo> aliases) {
+        private AliasCollector(Accumulator acc, Map<String, EntityInfo> aliases, Set<String> reasons) {
             this.acc = acc;
             this.aliases = aliases;
+            this.reasons = reasons;
         }
 
         @Override
@@ -795,6 +833,8 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                 String alias = ctx.variable() == null ? Accumulator.simpleName(ctx.entityName().getText()) :
                         variableName(ctx.variable());
                 aliases.put(alias.toLowerCase(Locale.ROOT), entity);
+            } else {
+                reasons.add("Entity '" + ctx.entityName().getText() + "' was not found in scanned Java source.");
             }
         }
 
@@ -823,14 +863,16 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         private final ParameterBindings bindings;
         private final String hql;
         private final List<Insertion> insertions;
+        private final Set<String> reasons;
 
         private ComparisonCollector(Accumulator acc, Map<String, EntityInfo> aliases, ParameterBindings bindings, String hql,
-                                    List<Insertion> insertions) {
+                                    List<Insertion> insertions, Set<String> reasons) {
             this.acc = acc;
             this.aliases = aliases;
             this.bindings = bindings;
             this.hql = hql;
             this.insertions = insertions;
+            this.reasons = reasons;
         }
 
         @Override
@@ -846,11 +888,19 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             PathResolution leftPath = resolvePath(left, aliases, acc);
             PathResolution rightPath = resolvePath(right, aliases, acc);
 
-            if (leftPath.kind() == PathKind.ENTITY && isScalar(right, rightPath, leftPath.entity(), bindings, acc)) {
-                addIdentifier(leftExpression, leftPath.entity());
+            if (leftPath.kind() == PathKind.ENTITY) {
+                if (isScalar(right, rightPath, leftPath.entity(), bindings, acc)) {
+                    addIdentifier(leftExpression, leftPath.entity());
+                } else {
+                    reasons.add(nonScalarReason(right, rightPath));
+                }
             }
-            if (rightPath.kind() == PathKind.ENTITY && isScalar(left, leftPath, rightPath.entity(), bindings, acc)) {
-                addIdentifier(rightExpression, rightPath.entity());
+            if (rightPath.kind() == PathKind.ENTITY) {
+                if (isScalar(left, leftPath, rightPath.entity(), bindings, acc)) {
+                    addIdentifier(rightExpression, rightPath.entity());
+                } else {
+                    reasons.add(nonScalarReason(left, leftPath));
+                }
             }
         }
 
@@ -862,7 +912,11 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             }
             String tested = source(testedExpression);
             PathResolution testedPath = resolvePath(tested, aliases, acc);
-            if (testedPath.kind() != PathKind.ENTITY || !inListMatchesIdentifier(ctx.inList(), testedPath.entity())) {
+            if (testedPath.kind() != PathKind.ENTITY) {
+                return;
+            }
+            if (!inListMatchesIdentifier(ctx.inList(), testedPath.entity())) {
+                reasons.add("The IN values are not proven to match the entity identifier type.");
                 return;
             }
             addIdentifier(testedExpression, testedPath.entity());
@@ -918,7 +972,23 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             String id = acc.identifier(entity);
             if (id != null) {
                 insertions.add(new Insertion(expression.getStop().getStopIndex() + 1, "." + id));
+            } else {
+                reasons.add("Entity '" + entity.entityName + "' does not have one resolvable identifier property.");
             }
+        }
+
+        private String nonScalarReason(String value, PathResolution path) {
+            if ("null".equalsIgnoreCase(value.trim())) {
+                return "Entity comparisons with null are valid and are left unchanged.";
+            }
+            if (PARAMETER.matcher(value.trim()).matches()) {
+                return "Parameter '" + value.trim() +
+                       "' is unbound, ambiguous, or does not match the entity identifier type.";
+            }
+            if (path.kind() == PathKind.ENTITY) {
+                return "Entity-to-entity comparisons are valid and are left unchanged.";
+            }
+            return "The opposite operand '" + value.trim() + "' is not proven to be an identifier value.";
         }
 
         private String source(org.antlr.v4.runtime.ParserRuleContext context) {
@@ -982,11 +1052,15 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
     private static final class SyntaxErrors extends BaseErrorListener {
         boolean failed;
+        String firstMessage = "unknown syntax error";
 
         @Override
         public void syntaxError(Recognizer<?, ?> recognizer, Object offendingSymbol, int line,
                                 int charPositionInLine, String msg, RecognitionException e) {
             failed = true;
+            if ("unknown syntax error".equals(firstMessage)) {
+                firstMessage = "line " + line + ":" + charPositionInLine + " " + msg;
+            }
         }
     }
 }

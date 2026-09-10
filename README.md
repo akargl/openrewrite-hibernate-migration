@@ -182,6 +182,80 @@ mvn -U org.openrewrite.maven:rewrite-maven-plugin:6.46.1:run \
 
 Always review the generated patch or `git diff` before committing the changes.
 
+## Diagnose unchanged queries
+
+The recipe records every static HQL/JPQL query it inspects in the `HQL entity comparison analysis` data table. Each row contains the source path, query API or annotation, original and rewritten query, outcome (`CHANGED`, `UNCHANGED`, or `SKIPPED`), and an explanation. This is useful when a query that appears eligible is not changed—for example, because its entity was not discovered, a parameter type could not be proven, its identifier is composite, or the HQL could not be parsed.
+
+Enable data-table export in Gradle:
+
+```kotlin
+rewrite {
+    activeRecipe("com.akargl.openrewrite.hibernate.MigrateHibernate5To6Queries")
+    exportDatatables = true
+}
+```
+
+For an init-script run, put this inside the `rootProject` block:
+
+```kotlin
+extensions.configure<org.openrewrite.gradle.RewriteExtension> {
+    exportDatatables = true
+}
+```
+
+Gradle writes exported tables below `build/reports/rewrite/datatables/`.
+
+Enable data-table export in Maven configuration:
+
+```xml
+<configuration>
+    <exportDatatables>true</exportDatatables>
+    <!-- existing activeRecipes configuration -->
+</configuration>
+```
+
+For a standalone Maven run, add:
+
+```shell
+-Drewrite.exportDatatables=true
+```
+
+Maven writes exported tables below `target/rewrite/datatables/`.
+
+## Exclude JSP resources
+
+This recipe scans and visits only Java syntax trees. The Maven and Gradle plugins may nevertheless parse other project resources before dispatching the recipe. Because JSP is not necessarily valid XML, exclude JSP-related resources if they cause parsing errors.
+
+For Gradle, add the exclusions to the `rewrite` block, or to the `RewriteExtension` block in the standalone init script:
+
+```kotlin
+exclusion(
+    "**/*.jsp",
+    "**/*.jspf",
+    "**/*.jspx",
+    "**/*.tag",
+    "**/*.tagx"
+)
+```
+
+For Maven plugin configuration:
+
+```xml
+<exclusions>
+    <exclusion>**/*.jsp</exclusion>
+    <exclusion>**/*.jspf</exclusion>
+    <exclusion>**/*.jspx</exclusion>
+    <exclusion>**/*.tag</exclusion>
+    <exclusion>**/*.tagx</exclusion>
+</exclusions>
+```
+
+For a standalone Maven run, add this quoted argument so the shell does not expand the globs:
+
+```shell
+'-Drewrite.exclusions=**/*.jsp,**/*.jspf,**/*.jspx,**/*.tag,**/*.tagx'
+```
+
 ## Optional: use newer Code Genome releases
 
 OpenRewrite is moving newer releases to the authenticated Code Genome Project repository. Use it only when a required plugin or OpenRewrite module is no longer available from the Gradle Plugin Portal or Maven Central, or when an organization already mirrors Code Genome internally. In that case, follow OpenRewrite's [repository and credential setup](https://docs.openrewrite.org/running-recipes/getting-started) and update the pinned plugin version deliberately.
