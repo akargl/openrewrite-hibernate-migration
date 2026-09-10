@@ -11,7 +11,11 @@ Recipes for recurring source changes encountered when migrating from Hibernate 5
 +select a from MyEntity a where a.id = 123
 ```
 
-The recipe discovers `@Entity`, `@MappedSuperclass`, `@Id`, and entity association metadata from Java source. It supports Java string literals and text blocks used by JPA/Hibernate query creation methods, JPA/Hibernate `@NamedQuery`, and Spring Data JPA `@Query`.
+The recipe discovers `@Entity`, `@MappedSuperclass`, `@Id`, and entity association metadata from Java source and from compiled dependency types referenced by the scanned Java code. Dependency entities therefore work when they occur in a field, method signature, repository generic, class literal, or another attributed type use. The dependency must be on the module's Java compile classpath.
+
+OpenRewrite exposes full bytecode metadata only for dependency types used by the module; its source-set inventory contains only the remaining class names. An entity mentioned exclusively as text in HQL cannot be inspected safely, and is left unchanged. Compiled type metadata also does not expose the value of a custom `@Entity(name = "...")`, so dependency entities with a custom HQL name must also be referenced by their default simple or fully qualified class name to be resolved.
+
+The recipe supports Java string literals and text blocks used by JPA/Hibernate query creation methods, JPA/Hibernate `@NamedQuery`, and Spring Data JPA `@Query`.
 
 HQL parameters are not assumed to be identifiers. A parameter comparison is changed only when the recipe can prove that the Java value bound through `setParameter(...)`, or declared by a Spring Data repository method, has the same type as the entity identifier. Explicit Hibernate `Class` arguments are used to type otherwise untyped `null` bindings. Unbound parameters, entity-typed parameters, conflicting bindings, and parameterized named queries without an analyzable binding are left unchanged.
 
@@ -184,7 +188,7 @@ Always review the generated patch or `git diff` before committing the changes.
 
 ## Diagnose unchanged queries
 
-The recipe records every static HQL/JPQL query it inspects in the `HQL entity comparison analysis` data table. Each row contains the source path, query API or annotation, original and rewritten query, outcome (`CHANGED`, `UNCHANGED`, or `SKIPPED`), and an explanation. This is useful when a query that appears eligible is not changed—for example, because its entity was not discovered, a parameter type could not be proven, its identifier is composite, or the HQL could not be parsed.
+The recipe records every static HQL/JPQL query it inspects in the `HQL entity comparison analysis` data table. Each row contains the source path, query API or annotation, original and rewritten query, outcome (`CHANGED`, `UNCHANGED`, or `SKIPPED`), and an explanation. This is useful when a query that appears eligible is not changed—for example, because its entity was not discovered in source or as a referenced dependency type, a parameter type could not be proven, its identifier is composite, or the HQL could not be parsed.
 
 Enable data-table export in Gradle:
 

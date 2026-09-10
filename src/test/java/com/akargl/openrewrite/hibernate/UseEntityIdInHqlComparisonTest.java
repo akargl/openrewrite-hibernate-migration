@@ -2,8 +2,15 @@ package com.akargl.openrewrite.hibernate;
 
 import org.junit.jupiter.api.Test;
 import org.openrewrite.java.JavaParser;
+import org.openrewrite.java.marker.JavaSourceSet;
+import org.openrewrite.java.tree.JavaType;
 import org.openrewrite.test.RecipeSpec;
 import org.openrewrite.test.RewriteTest;
+
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 import static org.openrewrite.java.Assertions.java;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -15,7 +22,75 @@ class UseEntityIdInHqlComparisonTest implements RewriteTest {
         spec.recipe(new UseEntityIdInHqlComparison())
                 .parser(JavaParser.fromJavaVersion()
                         .classpath("jakarta.persistence-api", "javax.persistence-api", "hibernate-core",
-                                "spring-data-jpa", "spring-data-commons"));
+                                "spring-data-jpa", "spring-data-commons")
+                        .addClasspathEntry(Path.of("build/classes/java/test")));
+    }
+
+    @Test
+    void discoversEntityMetadataFromAReferencedDependencyType() {
+        rewriteRun(
+          java(
+            """
+              package example;
+
+              import com.akargl.openrewrite.hibernate.fixture.DependencyEntity;
+              import jakarta.persistence.EntityManager;
+
+              class Queries {
+                  void run(EntityManager entityManager, DependencyEntity entity) {
+                      entityManager.createQuery("select e from DependencyEntity e where e = 123");
+                  }
+              }
+              """,
+            """
+              package example;
+
+              import com.akargl.openrewrite.hibernate.fixture.DependencyEntity;
+              import jakarta.persistence.EntityManager;
+
+              class Queries {
+                  void run(EntityManager entityManager, DependencyEntity entity) {
+                      entityManager.createQuery("select e from DependencyEntity e where e.id = 123");
+                  }
+              }
+              """
+          )
+        );
+    }
+
+    @Test
+    void explainsWhenADependencyEntityIsNotReferencedAsAJavaType() {
+        rewriteRun(
+          spec -> spec.dataTable(HqlQueryAnalysis.Row.class, rows -> {
+              assertEquals(1, rows.size());
+              assertEquals("UNCHANGED", rows.getFirst().outcome());
+              assertTrue(rows.getFirst().reason().contains(
+                      "matches dependency type(s) com.akargl.openrewrite.hibernate.fixture.DependencyEntity"),
+                      rows.getFirst().reason());
+              assertTrue(rows.getFirst().reason().contains("none is referenced as a Java type"),
+                      rows.getFirst().reason());
+          }),
+          java(
+            """
+              package example;
+
+              import jakarta.persistence.EntityManager;
+
+              class Queries {
+                  void run(EntityManager entityManager) {
+                      entityManager.createQuery("select e from DependencyEntity e where e = 123");
+                  }
+              }
+              """,
+            spec -> spec.markers(new JavaSourceSet(
+                    UUID.randomUUID(),
+                    "main",
+                    List.of(JavaType.ShallowClass.build(
+                            "com.akargl.openrewrite.hibernate.fixture.DependencyEntity")),
+                    Map.of()
+            ))
+          )
+        );
     }
 
     @Test

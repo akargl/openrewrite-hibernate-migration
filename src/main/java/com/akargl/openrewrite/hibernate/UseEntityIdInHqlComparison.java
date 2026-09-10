@@ -15,6 +15,7 @@ import org.openrewrite.ScanningRecipe;
 import org.openrewrite.TreeVisitor;
 import org.openrewrite.java.JavaIsoVisitor;
 import org.openrewrite.java.MethodMatcher;
+import org.openrewrite.java.marker.JavaSourceSet;
 import org.openrewrite.java.tree.Expression;
 import org.openrewrite.java.tree.J;
 import org.openrewrite.java.tree.JavaType;
@@ -100,6 +101,16 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
     @Override
     public TreeVisitor<?, ExecutionContext> getScanner(Accumulator acc) {
         return new JavaIsoVisitor<>() {
+            @Override
+            public J.CompilationUnit visitCompilationUnit(J.CompilationUnit compilationUnit, ExecutionContext ctx) {
+                compilationUnit.getMarkers().findFirst(JavaSourceSet.class)
+                        .filter(sourceSet -> acc.scannedSourceSets.add(sourceSet.getId()))
+                        .ifPresent(sourceSet -> sourceSet.getClasspath().forEach(type ->
+                                acc.classpathTypeNames.add(type.getFullyQualifiedName())));
+                scanAttributedTypes(acc, compilationUnit.getTypesInUse().getTypesInUse());
+                return super.visitCompilationUnit(compilationUnit, ctx);
+            }
+
             @Override
             public J.ClassDeclaration visitClassDeclaration(J.ClassDeclaration classDecl, ExecutionContext ctx) {
                 J.ClassDeclaration c = super.visitClassDeclaration(classDecl, ctx);
@@ -237,6 +248,71 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
         if (hasAnyAnnotation(method.getLeadingAnnotations(), JAKARTA_EMBEDDED_ID, JAVAX_EMBEDDED_ID)) {
             info.compositeIdentifier = true;
         }
+    }
+
+    private static void scanAttributedTypes(Accumulator acc, Set<JavaType> typesInUse) {
+        for (JavaType type : typesInUse) {
+            scanAttributedType(acc, TypeUtils.asFullyQualified(type), new HashSet<>());
+        }
+    }
+
+    private static void scanAttributedType(Accumulator acc, JavaType.FullyQualified type, Set<String> seen) {
+        if (type == null || !seen.add(type.getFullyQualifiedName())) {
+            return;
+        }
+
+        JavaType.FullyQualified superType = type.getSupertype();
+        if (superType != null) {
+            scanAttributedType(acc, superType, seen);
+        }
+
+        boolean entity = hasAnyTypeAnnotation(type.getAnnotations(), JAKARTA_ENTITY, JAVAX_ENTITY);
+        boolean mappedSuperclass = hasAnyTypeAnnotation(
+                type.getAnnotations(), JAKARTA_MAPPED_SUPERCLASS, JAVAX_MAPPED_SUPERCLASS
+        );
+        if (!entity && !mappedSuperclass) {
+            return;
+        }
+
+        EntityInfo info = new EntityInfo(type.getFullyQualifiedName(), type.getClassName(), entity);
+        info.compositeIdentifier = hasAnyTypeAnnotation(
+                type.getAnnotations(), JAKARTA_ID_CLASS, JAVAX_ID_CLASS
+        );
+        if (superType != null) {
+            info.superType = superType.getFullyQualifiedName();
+        }
+
+        for (JavaType.Variable member : type.getMembers()) {
+            info.attributeTypes.put(member.getName(), member.getType());
+            if (hasAnyTypeAnnotation(member.getAnnotations(), JAKARTA_ID, JAVAX_ID)) {
+                info.idProperties.add(member.getName());
+            }
+            if (hasAnyTypeAnnotation(member.getAnnotations(), JAKARTA_EMBEDDED_ID, JAVAX_EMBEDDED_ID)) {
+                info.compositeIdentifier = true;
+            }
+        }
+        for (JavaType.Method method : type.getMethods()) {
+            String property = getterProperty(method.getName());
+            if (property == null || !method.getParameterTypes().isEmpty()) {
+                continue;
+            }
+            info.attributeTypes.put(property, method.getReturnType());
+            if (hasAnyTypeAnnotation(method.getAnnotations(), JAKARTA_ID, JAVAX_ID)) {
+                info.idProperties.add(property);
+            }
+            if (hasAnyTypeAnnotation(method.getAnnotations(), JAKARTA_EMBEDDED_ID, JAVAX_EMBEDDED_ID)) {
+                info.compositeIdentifier = true;
+            }
+        }
+        if (info.idProperties.size() > 1) {
+            info.compositeIdentifier = true;
+        }
+        acc.types.putIfAbsent(info.fullyQualifiedName, info);
+    }
+
+    private static boolean hasAnyTypeAnnotation(List<JavaType.FullyQualified> annotations, String... names) {
+        Set<String> expected = Set.of(names);
+        return annotations.stream().anyMatch(annotation -> expected.contains(annotation.getFullyQualifiedName()));
     }
 
     private Expression rewriteQueryAttribute(Expression expression, Accumulator acc, ParameterBindings bindings,
@@ -543,6 +619,8 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
     static final class Accumulator {
         final Map<String, EntityInfo> types = new LinkedHashMap<>();
+        final Set<String> classpathTypeNames = new HashSet<>();
+        final Set<UUID> scannedSourceSets = new HashSet<>();
 
         EntityInfo entityByQueryName(String queryName) {
             EntityInfo match = null;
@@ -565,6 +643,13 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
 
         EntityInfo type(String fullyQualifiedName) {
             return fullyQualifiedName == null ? null : types.get(fullyQualifiedName);
+        }
+
+        List<String> dependencyCandidates(String queryName) {
+            return classpathTypeNames.stream()
+                    .filter(typeName -> queryName.equals(typeName) || queryName.equals(simpleName(typeName)))
+                    .sorted()
+                    .toList();
         }
 
         String identifier(EntityInfo entity) {
@@ -775,7 +860,7 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
             if (insertions.isEmpty()) {
                 if (reasons.isEmpty()) {
                     reasons.add(aliases.isEmpty() ?
-                            "No entity aliases could be resolved from Java source scanned in this run." :
+                            "No entity aliases could be resolved from scanned source or referenced dependency types." :
                             "No entity-valued equality or IN comparison requiring an identifier was found.");
                 }
                 return new QueryAnalysis(hql, "UNCHANGED", String.join(" ", reasons));
@@ -834,7 +919,17 @@ public class UseEntityIdInHqlComparison extends ScanningRecipe<UseEntityIdInHqlC
                         variableName(ctx.variable());
                 aliases.put(alias.toLowerCase(Locale.ROOT), entity);
             } else {
-                reasons.add("Entity '" + ctx.entityName().getText() + "' was not found in scanned Java source.");
+                String queryName = ctx.entityName().getText();
+                List<String> dependencyCandidates = acc.dependencyCandidates(queryName);
+                if (dependencyCandidates.isEmpty()) {
+                    reasons.add("Entity '" + queryName +
+                            "' was not found in scanned source or referenced dependency types.");
+                } else {
+                    reasons.add("Entity '" + queryName + "' matches dependency type(s) " +
+                            String.join(", ", dependencyCandidates) +
+                            ", but annotation and identifier metadata is unavailable because none is referenced " +
+                            "as a Java type in the scanned module.");
+                }
             }
         }
 
